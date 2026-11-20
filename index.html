@@ -872,8 +872,13 @@ const recentes = () => S.perfil ? (store.get('regula_recentes_' + S.perfil.id) |
 async function boot(){
   telaLogin();
   const cfg = window.REGULA_CONFIG;
-  if (!cfg?.url || !cfg?.publishableKey || !window.supabase) {
-    mostrarErroLogin('Configuração do serviço de autenticação pendente.');
+  if (!cfg?.url || !cfg?.publishableKey) {
+    mostrarErroLogin('O acesso ainda está sendo configurado pela administração.');
+    document.querySelector('#login-form button').disabled = true;
+    return;
+  }
+  if (!window.supabase) {
+    mostrarErroLogin('Não foi possível carregar o serviço de acesso. Recarregue a página.');
     return;
   }
   sb = window.supabase.createClient(cfg.url, cfg.publishableKey);
@@ -889,8 +894,9 @@ function mostrarErroLogin(texto){ $('#login-msg').textContent = texto; }
 async function abrirConta(user){
   const {data:p,error} = await sb.from('perfis').select('*').eq('id', user.id).maybeSingle();
   if(error || !p?.ativo || (['solicitante','executante'].includes(p.papel) && !p.unidade_id)){
+    const msg = error ? 'Falha ao consultar permissões. Tente novamente.' : 'Acesso pendente. Solicite a liberação à administração.';
     await sb.auth.signOut({scope:'local'});
-    mostrarErroLogin(error ? 'Falha ao consultar permissões. Tente novamente.' : 'Acesso pendente. Solicite a liberação à administração.');
+    mostrarErroLogin(msg);
     return;
   }
   await entrar(p);
@@ -909,9 +915,9 @@ function telaLogin(){
     btn.disabled=true;
     try {
       mostrarErroLogin('');
-      const {data,error}=await sb.auth.signInWithPassword({email:form.email.value.trim(),password:form.senha.value});
+      const {data,error}=await sb.auth.signInWithPassword({email:form.elements.namedItem('email').value.trim(),password:form.elements.namedItem('senha').value});
       if(error) return mostrarErroLogin('Não foi possível entrar. Confira o e-mail e a senha.');
-      form.senha.value='';
+      form.elements.namedItem('senha').value='';
       await abrirConta(data.user);
     } catch { mostrarErroLogin('Não foi possível acessar o serviço. Tente novamente.'); }
     finally { btn.disabled=false; }
@@ -926,10 +932,9 @@ async function entrar(perfil){
   $('#u-nome').textContent = S.perfil.nome;
   $('#u-info').textContent = PAPEIS[S.perfil.papel] + (S.perfil.unidade_id ? ' · ' + nomeUnidade(S.perfil.unidade_id) : '');
   $('#btn-sair').onclick = async () => {
-    store.del(chaveRascunho());
     const {error} = await sb.auth.signOut({scope:'local'});
     if(error) toast('Falha ao sair. Tente novamente.', 'err');
-    else location.reload();
+    else { S.user = null; location.reload(); }
   };
   const abrir = v => { $('#sidebar').classList.toggle('aberto', v); $('#menu-fundo').classList.toggle('aberto', v); $('#menu-btn').setAttribute('aria-expanded', v);
     if(v) $('#nav a')?.focus(); };
