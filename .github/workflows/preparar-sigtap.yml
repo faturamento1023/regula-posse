@@ -1,0 +1,37 @@
+name: Preparar SIGTAP
+on:
+  push:
+    paths:
+      - .github/workflows/preparar-sigtap.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  extrair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Baixar e inspecionar pacote
+        run: |
+          python3 - <<'PY'
+          import io, urllib.request, zipfile, pathlib
+          url = 'https://github.com/hsms87/sigtap/raw/main/tabelas/TabelaUnificada_202611_v2611051737.zip'
+          with urllib.request.urlopen(url, timeout=90) as resp:
+              data = resp.read()
+          z = zipfile.ZipFile(io.BytesIO(data))
+          names = z.namelist()
+          out = ['Arquivo: TabelaUnificada_202611_v2611051737.zip', 'Bytes: '+str(len(data)), *names]
+          for name in names:
+              if 'tb_procedimento' in name.lower() and ('layout' in name.lower() or name.lower().endswith('tb_procedimento.txt')):
+                  content = z.read(name).decode('latin1')
+                  out += ['--- '+name+' ---', *content.splitlines()[:4]]
+          pathlib.Path('data').mkdir(exist_ok=True)
+          pathlib.Path('data/sigtap-inspecao.txt').write_text('\n'.join(out), encoding='utf-8')
+          PY
+      - name: Registrar layout
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/sigtap-inspecao.txt
+          git commit -m "Registra layout da tabela SIGTAP 11/2026" || exit 0
+          git push
