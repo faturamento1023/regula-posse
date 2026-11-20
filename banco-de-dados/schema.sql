@@ -61,6 +61,7 @@ create table if not exists perfis (
 create table if not exists procedimentos (
   id             bigint generated always as identity primary key,
   codigo_sigtap  text,
+  competencia_sigtap text,
   nome           text not null,
   tipo           text not null default 'consulta'
                  check (tipo in ('consulta','exame','cirurgia','terapia','outro')),
@@ -71,6 +72,8 @@ create table if not exists procedimentos (
 -- v4: quando true, a solicitação precisa ser AUTORIZADA pelo regulador antes do agendamento.
 -- Padrão false = mesmo comportamento das versões anteriores (vai direto para o agendamento).
 alter table procedimentos add column if not exists exige_regulacao boolean not null default false;
+alter table procedimentos add column if not exists competencia_sigtap text;
+create unique index if not exists procedimentos_codigo_sigtap_uniq on procedimentos (codigo_sigtap);
 
 -- Quais procedimentos cada local de atendimento realiza
 create table if not exists unidade_procedimentos (
