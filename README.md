@@ -17,3 +17,11 @@ O administrador cadastra unidades e procedimentos e libera as demais contas em U
 | Executante | Consulta as guias e confirma realização ou falta dos atendimentos da unidade vinculada. |
 
 O pacote não inclui pacientes, unidades, procedimentos ou usuários fictícios. A URL e a chave pública do projeto ficam no config.js após criar o projeto Supabase. A senha individual é definida no Supabase Auth e nunca deve ser colocada no repositório.
+
+## Catálogo SIGTAP
+
+O banco contém 5.068 códigos e nomes da competência **11/2026**, extraídos de `TabelaUnificada_202611_v2611051737.zip` (espelho do FTP do DATASUS). A origem, o hash SHA-256 e a contagem constam em [data/sigtap-202611/manifesto.json](data/sigtap-202611/manifesto.json). O arquivo `tb_procedimento.txt` é de largura fixa: código nas posições 1–10 e nome nas posições 11–260, em Latin-1. O fluxo de extração está em `.github/workflows/preparar-sigtap.yml`, e os lotes SQL em `data/sigtap-202611/`.
+
+Todos os procedimentos importados começam **inativos**. Em **Procedimentos**, selecione **Somente inativos**, busque por nome ou código, edite o tipo e a exigência de regulação, e ative somente os oferecidos pelo município. Cadastre os locais e associe os procedimentos habilitados a eles. Nenhum procedimento foi liberado automaticamente para agendamento.
+
+Para atualizar uma competência futura, altere a URL e a competência no workflow, execute-o, revise o manifesto e aplique os novos lotes SQL. A importação preserva o campo `ativo`, o tipo, a especialidade e a regra de regulação dos códigos já existentes.
