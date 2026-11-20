@@ -11,27 +11,46 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Baixar e inspecionar pacote
+      - name: Baixar e converter catálogo
         run: |
           python3 - <<'PY'
-          import io, urllib.request, zipfile, pathlib
+          import hashlib, io, json, pathlib, urllib.request, zipfile
           url = 'https://github.com/hsms87/sigtap/raw/main/tabelas/TabelaUnificada_202611_v2611051737.zip'
           with urllib.request.urlopen(url, timeout=90) as resp:
               data = resp.read()
           z = zipfile.ZipFile(io.BytesIO(data))
-          names = z.namelist()
-          out = ['Arquivo: TabelaUnificada_202611_v2611051737.zip', 'Bytes: '+str(len(data)), *names]
-          for name in names:
-              if 'tb_procedimento' in name.lower() and ('layout' in name.lower() or name.lower().endswith('tb_procedimento.txt')):
-                  content = z.read(name).decode('latin1')
-                  out += ['--- '+name+' ---', *content.splitlines()[:4]]
-          pathlib.Path('data').mkdir(exist_ok=True)
-          pathlib.Path('data/sigtap-inspecao.txt').write_text('\n'.join(out), encoding='utf-8')
+          rows = []
+          for raw in z.read('tb_procedimento.txt').splitlines():
+              code = raw[:10].decode('ascii')
+              name = raw[10:260].decode('latin1').strip()
+              if len(code) != 10 or not code.isdigit() or not name:
+                  raise ValueError('Registro inválido no pacote SIGTAP')
+              rows.append((code, name))
+          if len(rows) != len(set(code for code, _ in rows)):
+              raise ValueError('Códigos duplicados')
+          if not 4500 <= len(rows) <= 6000:
+              raise ValueError('Quantidade inesperada')
+          output = pathlib.Path('data/sigtap-202611')
+          output.mkdir(parents=True, exist_ok=True)
+          for previous in output.glob('parte-*.sql'):
+              previous.unlink()
+          quote = lambda s: "'" + s.replace("'", "''") + "'"
+          for i in range(0, len(rows), 400):
+              values = ',\n'.join(f"({quote(code)}, {quote(name)}, 'outro', false, '202611')" for code, name in rows[i:i+400])
+              sql = ("-- SIGTAP DATASUS 11/2026; catálogo inativo até habilitação municipal.\n"
+                     "insert into public.procedimentos (codigo_sigtap,nome,tipo,ativo,competencia_sigtap) values\n"
+                     + values + "\non conflict (codigo_sigtap) do update set\n"
+                     " nome = excluded.nome, competencia_sigtap = excluded.competencia_sigtap;\n")
+              (output / f'parte-{i//400+1:02d}.sql').write_text(sql, encoding='utf-8')
+          metadata = {'competencia':'202611','registros':len(rows),'partes':(len(rows)+399)//400,
+                      'arquivo':'TabelaUnificada_202611_v2611051737.zip',
+                      'sha256_zip':hashlib.sha256(data).hexdigest(),'fonte':url}
+          (output / 'manifesto.json').write_text(json.dumps(metadata, indent=2, ensure_ascii=False)+'\n', encoding='utf-8')
           PY
-      - name: Registrar layout
+      - name: Registrar arquivos
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/sigtap-inspecao.txt
-          git commit -m "Registra layout da tabela SIGTAP 11/2026" || exit 0
+          git add data/sigtap-202611
+          git commit -m "Prepara catálogo SIGTAP 11/2026" || exit 0
           git push
