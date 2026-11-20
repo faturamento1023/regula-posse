@@ -1,0 +1,99 @@
+Arquivo: TabelaUnificada_202611_v2611051737.zip
+Bytes: 2173129
+tb_detalhe_layout.txt
+rl_procedimento_sia_sih.txt
+tb_sia_sih.txt
+tb_habilitacao.txt
+rl_procedimento_tuss.txt
+tb_ocupacao_layout.txt
+tb_financiamento_layout.txt
+rl_procedimento_habilitacao_layout.txt
+rl_procedimento_regra_cond.txt
+tb_habilitacao_layout.txt
+tb_procedimento_layout.txt
+tb_sub_grupo.txt
+tb_tipo_leito_layout.txt
+rl_procedimento_registro.txt
+rl_procedimento_servico.txt
+rl_procedimento_renases_layout.txt
+tb_servico.txt
+rl_procedimento_sia_sih_layout.txt
+tb_ocupacao.txt
+rl_procedimento_detalhe.txt
+tb_grupo_layout.txt
+tb_detalhe.txt
+tb_sub_grupo_layout.txt
+rl_procedimento_tuss_layout.txt
+rl_procedimento_modalidade.txt
+tb_registro_layout.txt
+tb_procedimento.txt
+tb_grupo.txt
+tb_regra_condicionada.txt
+rl_procedimento_comp_rede_layout.txt
+tb_registro.txt
+rl_procedimento_cid_layout.txt
+rl_procedimento_modalidade_layout.txt
+tb_componente_rede_layout.txt
+config.inf
+rl_procedimento_habilitacao.txt
+tb_rede_atencao_layout.txt
+rl_procedimento_ocupacao_layout.txt
+rl_procedimento_servico_layout.txt
+rl_procedimento_compativel.txt
+tb_servico_classificacao_layout.txt
+tb_descricao_detalhe.txt
+rl_procedimento_leito_layout.txt
+tb_componente_rede.txt
+tb_descricao_detalhe_layout.txt
+tb_tuss.txt
+rl_procedimento_detalhe_layout.txt
+rl_procedimento_incremento.txt
+tb_renases_layout.txt
+rl_excecao_compatibilidade_layout.txt
+tb_modalidade.txt
+tb_tipo_leito.txt
+rl_procedimento_registro_layout.txt
+tb_sia_sih_layout.txt
+versao
+rl_procedimento_comp_rede.txt
+tb_regra_condicionada_layout.txt
+tb_forma_organizacao.txt
+tb_rubrica_layout.txt
+tb_descricao_layout.txt
+tb_cid_layout.txt
+tb_descricao.txt
+tb_rede_atencao.txt
+tb_modalidade_layout.txt
+tb_forma_organizacao_layout.txt
+rl_procedimento_cid.txt
+tb_grupo_habilitacao_layout.txt
+rl_procedimento_compativel_layout.txt
+DATASUS - Tabela de Procedimentos - Lay-out.xls
+tb_cid.txt
+tb_servico_classificacao.txt
+layout.txt
+rl_procedimento_leito.txt
+tb_servico_layout.txt
+rl_procedimento_regra_cond_layout.txt
+tb_grupo_habilitacao.txt
+tb_tuss_layout.txt
+rl_procedimento_renases.txt
+tb_rubrica.txt
+rl_excecao_compatibilidade.txt
+tb_renases.txt
+rl_procedimento_origem_layout.txt
+rl_procedimento_incremento_layout.txt
+tb_financiamento.txt
+rl_procedimento_ocupacao.txt
+rl_procedimento_origem.txt
+LEIA_ME.TXT
+--- tb_procedimento_layout.txt ---
+Coluna,Tamanho,Inicio,Fim,Tipo
+CO_PROCEDIMENTO,10,1,10,VARCHAR2
+NO_PROCEDIMENTO,250,11,260,VARCHAR2
+TP_COMPLEXIDADE,1,261,261,VARCHAR2
+--- tb_procedimento.txt ---
+0101010010ATIVIDADE EDUCATIVA / ORIENTAÇÃO EM GRUPO NA ATENÇÃO PRIMÁRIA                                                                                                                                                                                             1N9999999900009999999900000000000000000000000000000000000001      9999202611
+0101010028ATIVIDADE EDUCATIVA / ORIENTAÇÃO EM GRUPO NA ATENÇÃO ESPECIALIZADA                                                                                                                                                                                        2I9999999900000084157100000000000000000000027000000000000006      9999202611
+0101010036PRÁTICA CORPORAL / ATIVIDADE FÍSICA EM GRUPO                                                                                                                                                                                                              1I9999999900000072157100000000000000000000000000000000000001      9999202611
+0101010095PREVENÇÃO DA COVID-19 NAS ESCOLAS                                                                                                                                                                                                                         1I9999999900000000157100000000000000000000000000000000000001      9999202611
