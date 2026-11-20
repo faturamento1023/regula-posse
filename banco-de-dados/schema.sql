@@ -614,7 +614,11 @@ create policy his_sel on historico for select to authenticated using (
 
 -- ---------------------------------------------------------------------
 
-alter table perfis add constraint perfil_unidade_obrigatoria check (not ativo or papel::text not in ('solicitante','executante') or unidade_id is not null);
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'perfil_unidade_obrigatoria' and conrelid = 'public.perfis'::regclass) then
+    alter table perfis add constraint perfil_unidade_obrigatoria check (not ativo or papel::text not in ('solicitante','executante') or unidade_id is not null);
+  end if;
+end $$;
 revoke all on table perfis from anon,authenticated;
 grant select on perfis to authenticated;
 grant update(nome,papel,unidade_id,ativo) on perfis to authenticated;
@@ -623,6 +627,7 @@ begin
  if old.id=auth.uid() and (new.papel<>old.papel or not new.ativo) then raise exception 'Outro administrador precisa alterar seu acesso'; end if;
  return new;
 end $$;
+drop trigger if exists protege_admin on perfis;
 create trigger protege_admin before update on perfis for each row execute function proteger_proprio_acesso();
 -- Privilégios explícitos do cliente. As políticas acima limitam cada operação.
 revoke all on unidades, procedimentos, unidade_procedimentos, pacientes, vagas, solicitacoes, historico, vw_solicitacoes from anon, authenticated;
