@@ -15,3 +15,5 @@ O administrador cadastra unidades e procedimentos e libera as demais contas em U
 | Agendador | Organiza filas e vagas, agenda e confirma atendimentos e gerencia cadastros operacionais. |
 | Atendente | Registra pacientes e pedidos, corrige devoluções e agenda pedidos da unidade conforme a regra do procedimento. |
 | Executante | Consulta as guias e confirma realização ou falta dos atendimentos da unidade vinculada. |
+
+O pacote não inclui pacientes, unidades, procedimentos ou usuários fictícios. A URL e a chave pública do projeto ficam no config.js após criar o projeto Supabase. A senha individual é definida no Supabase Auth e nunca deve ser colocada no repositório.
