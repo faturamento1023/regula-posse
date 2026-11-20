@@ -950,10 +950,19 @@ async function entrar(perfil){
 async function carregarRefs(){
   const [u, p, up] = await Promise.all([
     q(sb.from('unidades').select('*').order('nome')),
-    q(sb.from('procedimentos').select('*').order('nome')),
+    carregarProcedimentos(),
     q(sb.from('unidade_procedimentos').select('*'))
   ]);
   S.unidades = u; S.procedimentos = p; S.unProc = up;
+}
+async function carregarProcedimentos(){
+  const todos = [];
+  for(let inicio = 0; ; inicio += 1000){
+    const lote = await q(sb.from('procedimentos').select('*').order('id').range(inicio, inicio + 999));
+    todos.push(...lote);
+    if(lote.length < 1000) break;
+  }
+  return todos.sort((a,b) => a.nome.localeCompare(b.nome, 'pt-BR'));
 }
 
 /* =====================================================================
@@ -1519,7 +1528,7 @@ async function pgSolicitacao(el){
         <span class="dica" id="sel-proc-d">Escolha e clique em Adicionar. Repita para cada item do pedido.</span>
         <p class="erro-msg hidden" id="sel-proc-e"></p>
         <div class="row" style="flex-wrap:nowrap"><select id="sel-proc" aria-describedby="sel-proc-d sel-proc-e" style="flex:1"><option value="">Selecione</option>
-          ${grupos.map(([t, l]) => `<optgroup label="${h(TIPOS_PROC[t])}">${l.map(p => `<option value="${p.id}">${h(p.nome)}${p.exige_regulacao ? ' — exige regulação' : ''}</option>`).join('')}</optgroup>`).join('')}
+          ${grupos.map(([t, l]) => `<optgroup label="${h(TIPOS_PROC[t])}">${l.map(p => `<option value="${p.id}">${p.codigo_sigtap ? h(p.codigo_sigtap) + ' — ' : ''}${h(p.nome)}${p.exige_regulacao ? ' — exige regulação' : ''}</option>`).join('')}</optgroup>`).join('')}
         </select><button type="button" class="btn" id="add-proc">+ Adicionar</button></div></div>
       <div class="proc-list" id="proc-list" aria-live="polite"></div>`;
   }
@@ -2824,7 +2833,7 @@ function crud({ el, tabela, campos, colunas, ordem='nome', titulo, artigo='o', e
     $$('[data-ed]:not([data-ok])', el).forEach(b => { b.dataset.ok = 1; b.onclick = () => editar(dados.find(d => String(d.id) === b.dataset.ed)); });
     $$('[data-tg]:not([data-ok])', el).forEach(b => { b.dataset.ok = 1; b.onclick = () => alternar(dados.find(d => String(d.id) === b.dataset.tg), b); });
   }).observe($('#c-lista', el), { childList:true, subtree:true });
-  async function carregar(){ dados = await q(sb.from(tabela).select('*').order(ordem)); render(); }
+  async function carregar(){ dados = tabela === 'procedimentos' ? S.procedimentos : await q(sb.from(tabela).select('*').order(ordem)); render(); }
   $('#c-busca').oninput = debounce(render, 200); $('#c-sit').onchange = render;
   return carregar();
 }
@@ -2863,7 +2872,8 @@ function pgLocais(el){
 
 /* ---------- Procedimentos ---------- */
 function pgProcedimentos(el){
-  return crud({ el, tabela:'procedimentos', titulo:'procedimento', artigo:'o',
+  el.innerHTML = alerta('info', 'A tabela SIGTAP importada está em <b>Situação → Somente inativos</b>. Busque pelo código ou nome, edite o tipo e a regulação, e ative apenas os procedimentos oferecidos pelo município.') + '<div id="crud"></div>';
+  return crud({ el: $('#crud', el), tabela:'procedimentos', titulo:'procedimento', artigo:'o',
     efeitoDesativar:'Não aparece em novas solicitações nem em novas agendas; solicitações já registradas continuam.',
     campos:[
       { name:'nome', label:'Nome', required:true, span:3 },
