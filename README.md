@@ -131,6 +131,22 @@ O **CBO** mora no profissional, não no procedimento, porque o elemento do MIRA 
 
 A vaga guarda o id **e** o nome do profissional. A cópia do nome é intencional: se o cadastro for renomeado depois, a guia já impressa continua batendo com o papel que o paciente tem na mão.
 
+## Catálogo CID-10
+
+O campo CID-10 da solicitação era texto livre com `maxlength` 6 — aceitava `I20`, `i20`, `I 20` e `I20.O` com a letra O no lugar do zero. Como o MIRA exige o motivo da solicitação em CID-10, código inválido vira registro recusado na transmissão.
+
+Agora existe a tabela `cid10` com as categorias (3 caracteres, como `I20`) e as subcategorias (4 caracteres, como `I20.0`), porque o médico escreve as duas formas. O campo na tela busca por código **ou por parte do nome da doença**: digitar "hipertensão" encontra `I10`.
+
+São cerca de 14 mil códigos, e eles **não** vão para a memória do navegador — a busca é feita no banco pela função `buscar_cid10()`. É deliberadamente o oposto do que acontece hoje com os procedimentos, que são carregados inteiros a cada login e estão na lista de pendências por isso.
+
+### Importar o catálogo
+
+O workflow **Preparar CID-10** (`.github/workflows/preparar-cid10.yml`) baixa os CSVs do DATASUS, converte em lotes SQL em `data/cid10/` e registra origem, contagem e hash no manifesto — mesmo padrão da SIGTAP. Rode-o em Actions e depois aplique os lotes no SQL Editor.
+
+Ele tenta primeiro a URL oficial do DATASUS e só então um espelho, e grava no manifesto qual das duas respondeu. As validações são propositalmente rígidas: se a contagem de categorias ou subcategorias sair das faixas esperadas, se houver código duplicado ou com formato inesperado, ou se o código de referência `I20` não estiver presente, o workflow falha em vez de comitar um catálogo truncado.
+
+**Enquanto o catálogo não for importado, o campo continua aceitando digitação livre** com formato de CID. É o que permite aplicar a migração antes de rodar o workflow sem travar o registro de solicitação na recepção.
+
 ## Envio ao Ministério (MIRA)
 
 **Administração → Envio ao Ministério** monta os 16 elementos do Modelo de Informação da Regulação Assistencial e aponta o que impede o envio de cada registro — solicitação sem CID-10, procedimento sem código SIGTAP, unidade sem CNES, paciente sem CPF e sem CNS.

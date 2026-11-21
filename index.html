@@ -57,6 +57,22 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px soli
 td small.atraso{color:var(--warn);font-weight:600}
 /* a segunda espera cabe numa linha; quebrada, engorda a altura de toda a lista */
 td.n small{white-space:nowrap}
+
+/* ---------- busca de CID-10 ---------- */
+/* A lista flutua sobre o formulário: presa à largura da coluna do campo,
+   descrição de CID quebrava em quatro linhas e ficava ilegível. */
+.busca-cid{margin-top:4px;position:relative}
+.busca-cid p{margin:0;font-size:12.5px}
+.busca-cid .cid-ok{color:var(--ok);font-weight:600}
+.busca-cid .cid-nao{color:var(--warn);font-weight:600}
+.cid-sug{list-style:none;margin:0;padding:0;border:1px solid var(--borda);border-radius:var(--r-sm);
+  background:#fff;max-height:260px;overflow:auto;box-shadow:var(--sombra-lg);
+  position:absolute;z-index:20;left:0;top:0;min-width:min(380px,80vw);width:max-content;max-width:min(520px,88vw)}
+.cid-sug li+li{border-top:1px solid var(--borda)}
+.cid-sug button{display:block;width:100%;text-align:left;border:0;background:none;padding:7px 10px;
+  cursor:pointer;font-size:13px;line-height:1.3}
+.cid-sug button:hover,.cid-sug button:focus-visible{background:var(--azul-50)}
+.cid-sug b{color:var(--azul);margin-right:6px}
 .nowrap{white-space:nowrap}
 .spacer{flex:1}
 

@@ -138,6 +138,57 @@ function registrarAcesso(pacienteId, contexto){
 window.addEventListener('error', e => registrarErro(e.error ?? e.message, 'window.onerror'));
 window.addEventListener('unhandledrejection', e => registrarErro(e.reason, 'promessa não tratada'));
 
+/* =====================================================================
+   BUSCA DE CID-10
+   O catálogo tem cerca de 14 mil códigos, então ele NÃO vai para a memória
+   do navegador: a busca é feita no banco, por código ou por parte da
+   descrição. Enquanto o catálogo não tiver sido importado, o campo segue
+   aceitando digitação livre — é o que permite aplicar a migração antes de
+   rodar o workflow sem travar o registro na recepção.
+   ===================================================================== */
+async function ligarBuscaCID(root, id = 'sw-cid10'){
+  const campo = $('#' + id, root);
+  if(!campo) return;
+
+  const caixa = document.createElement('div');
+  caixa.className = 'busca-cid';
+  caixa.setAttribute('aria-live', 'polite');
+  campo.insertAdjacentElement('afterend', caixa);
+
+  const descrever = async () => {
+    const v = campo.value.trim();
+    if(!v) return caixa.innerHTML = '';
+    try {
+      const r = await q(sb.rpc('buscar_cid10', { p_termo: v, p_limite: 1 }));
+      const exato = r.find(c => c.codigo.replace('.', '').toUpperCase() === v.replace('.', '').toUpperCase());
+      caixa.innerHTML = exato
+        ? `<p class="cid-ok">${h(exato.codigo)} — ${h(exato.descricao)}</p>`
+        : `<p class="cid-nao">Código não encontrado na CID-10. Confira no pedido médico.</p>`;
+    } catch { caixa.innerHTML = ''; }
+  };
+
+  const sugerir = async () => {
+    const termo = campo.value.trim();
+    if(termo.length < 2) return caixa.innerHTML = '';
+    let lista;
+    try { lista = await q(sb.rpc('buscar_cid10', { p_termo: termo, p_limite: 8 })); }
+    catch { return caixa.innerHTML = ''; }
+    if(!lista.length) return descrever();
+    caixa.innerHTML = `<ul class="cid-sug">${lista.map(c =>
+      `<li><button type="button" data-cid="${h(c.codigo)}"><b>${h(c.codigo)}</b> ${h(c.descricao)}</button></li>`).join('')}</ul>`;
+    $$('button[data-cid]', caixa).forEach(b => b.onclick = () => {
+      campo.value = b.dataset.cid;
+      campo.dispatchEvent(new Event('change', { bubbles:true }));
+      descrever();
+      campo.focus();
+    });
+  };
+
+  campo.addEventListener('input', debounce(sugerir, 300));
+  campo.addEventListener('blur', () => setTimeout(descrever, 180));
+  if(campo.value.trim()) descrever();
+}
+
 /* ---------------- etiquetas ---------------- */
 const badgePrio = (p, longo) => p ? `<span class="badge pr-${p}"><span class="s" aria-hidden="true">${PRIORIDADES[p].s}</span>${h(PRIORIDADES[p].l)}${longo ? ' — ' + h(PRIORIDADES[p].d) : ''}</span>` : '';
 function chaveStatus(x){
@@ -1282,14 +1333,18 @@ async function pgSolicitacao(el){
     { name:'origem', label:'Unidade ou serviço que emitiu o pedido', type:'select', required:true, num:true, span:2,
       options: S.unidades.filter(u => u.ativo).map(u => ({ value:u.id, label:u.nome })), dica:'Onde o médico atendeu o paciente.' },
     { name:'data_pedido', label:'Data do pedido médico', required:true, mask:'data', dica:'dd/mm/aaaa, como está no pedido' },
-    { name:'cid10', label:'CID-10', dica:'Ex.: I10 ou M54.5', attrs:'maxlength="6" style="text-transform:uppercase"' },
+    { name:'cid10', label:'CID-10', span:2, dica:'Digite o código ou parte do nome da doença. Ex.: I10, ou "hipertensão".',
+      attrs:'maxlength="60" autocomplete="off"' },
     { name:'profissional', label:'Profissional solicitante', required:true, span:2, dica:'Nome do médico(a) que assinou o pedido' },
     { name:'crm', label:'CRM ou registro', dica:'Ex.: CRM-GO 12345' },
     ...(!S.perfil.unidade_id ? [{ name:'registro', label:'Unidade de registro', type:'select', required:true, num:true,
       options: S.unidades.filter(u => u.ativo && u.tipo !== 'executante').map(u => ({ value:u.id, label:u.nome })), dica:'Unidade onde a solicitação está sendo registrada.' }] : []),
   ];
   function etapa2(){ return formHtml(F_PEDIDO(), { origem:W.origem, data_pedido:W.data_pedido, cid10:W.cid10, profissional:W.profissional, crm:W.crm, registro:W.registro }, 'sw'); }
-  function liga2(c){ $$('input,select', c).forEach(i => i.addEventListener('change', () => { coletar(c); salvarRascunho(); })); }
+  function liga2(c){
+    $$('input,select', c).forEach(i => i.addEventListener('change', () => { coletar(c); salvarRascunho(); }));
+    ligarBuscaCID(c, 'sw-cid10');
+  }
 
   /* ---------- Etapa 3: procedimentos ---------- */
   function etapa3(){

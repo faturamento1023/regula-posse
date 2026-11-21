@@ -398,3 +398,78 @@ begin
 end $$;
 
 select 'TESTES DA MIGRAÇÃO 004 PASSARAM' as resultado;
+
+-- =====================================================================
+--  CATÁLOGO CID-10 (migração 005)
+-- =====================================================================
+do $$
+begin
+  -- Catálogo vazio: aceita o que tem formato de CID e recusa o resto. É o
+  -- que permite aplicar a migração antes de importar os lotes sem travar o
+  -- registro de solicitação na recepção.
+  if not cid10_valido('I20')   then raise exception 'catálogo vazio devia aceitar I20'; end if;
+  if not cid10_valido('I20.0') then raise exception 'catálogo vazio devia aceitar I20.0'; end if;
+  if not cid10_valido('')      then raise exception 'vazio é tratado por quem chama'; end if;
+  if cid10_valido('I20.O')     then raise exception 'letra O no lugar do zero devia ser recusada'; end if;
+  if cid10_valido('X')         then raise exception 'código curto devia ser recusado'; end if;
+  if cid10_valido('ABC12')     then raise exception 'formato inválido devia ser recusado'; end if;
+end $$;
+
+insert into cid10 (codigo, descricao, nivel, capitulo, competencia) values
+  ('I20',   'Angina pectoris',                  'categoria',    'IX',   '2008'),
+  ('I20.0', 'Angina instável',                  'subcategoria', 'IX',   '2008'),
+  ('I10',   'Hipertensão essencial (primária)', 'categoria',    'IX',   '2008'),
+  ('M54.5', 'Dor lombar baixa',                 'subcategoria', 'XIII', '2008');
+
+do $$
+declare n int;
+begin
+  -- Com catálogo, só passa o que existe
+  if not cid10_valido('I20.0') then raise exception 'I20.0 existe e devia passar'; end if;
+  if not cid10_valido('i200')  then raise exception 'minúsculo e sem ponto devia passar'; end if;
+  if cid10_valido('I20.9')     then raise exception 'I20.9 não está no catálogo e devia ser recusado'; end if;
+
+  -- codigo_limpo é gerado pelo banco
+  if (select codigo_limpo from cid10 where codigo = 'M54.5') <> 'M545' then
+    raise exception 'codigo_limpo devia tirar o ponto';
+  end if;
+
+  -- Busca por código e por descrição
+  select count(*) into n from buscar_cid10('I20');
+  if n <> 2 then raise exception 'busca por I20 devia achar 2, achou %', n; end if;
+  select count(*) into n from buscar_cid10('lombar');
+  if n <> 1 then raise exception 'busca por descrição devia achar 1, achou %', n; end if;
+  select count(*) into n from buscar_cid10('hipertens');
+  if n <> 1 then raise exception 'busca parcial por descrição devia achar 1, achou %', n; end if;
+
+  -- Termo curto não varre a tabela inteira
+  select count(*) into n from buscar_cid10('I');
+  if n <> 0 then raise exception 'termo de 1 caractere não devia buscar'; end if;
+
+  -- O limite é respeitado e tem teto
+  select count(*) into n from buscar_cid10('I', 999);
+  if n <> 0 then raise exception 'termo curto continua sem buscar mesmo com limite alto'; end if;
+end $$;
+
+-- O MIRA passa a apontar CID fora do catálogo
+do $$
+begin
+  update solicitacoes set cid10 = 'Z99.9' where id = 1;   -- formato válido, fora do catálogo
+  if not exists (select 1 from mira_pendencias() where problema like '%fora do catálogo%') then
+    raise exception 'mira_pendencias devia apontar CID fora do catálogo';
+  end if;
+  update solicitacoes set cid10 = 'I20.0' where id = 1;
+  if exists (select 1 from mira_pendencias() where problema like '%fora do catálogo%') then
+    raise exception 'com CID válido não devia haver pendência de catálogo';
+  end if;
+end $$;
+
+-- anon não alcança o catálogo
+do $$
+begin
+  if has_table_privilege('anon', 'public.cid10', 'SELECT') then
+    raise exception 'anon não devia ler cid10';
+  end if;
+end $$;
+
+select 'TESTES DA MIGRAÇÃO 005 PASSARAM' as resultado;
