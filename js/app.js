@@ -189,6 +189,107 @@ async function ligarBuscaCID(root, id = 'sw-cid10'){
   if(campo.value.trim()) descrever();
 }
 
+/* =====================================================================
+   ANEXOS — pedido médico e exames
+   ---------------------------------------------------------------------
+   O arquivo vai para um bucket PRIVADO do Storage; a leitura é sempre por
+   URL assinada de validade curta. O acesso é decidido pelo RLS da
+   solicitação, não pelo cliente — ver a migração 006.
+
+   Foto de pedido tirada com celular passa de 3 MB, e o plano de
+   armazenamento do município é limitado, então imagem é reduzida no
+   navegador antes de subir. PDF vai como está: recomprimir PDF no cliente
+   arrisca perder legibilidade de exame.
+   ===================================================================== */
+const ANEXO_TIPOS = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/heic'];
+const ANEXO_MAX_MB = 8;        // antes da redução
+const ANEXO_MAX_POR_SOL = 5;
+const DOCUMENTOS = { pedido:'Pedido / encaminhamento', exame:'Exame ou laudo', outro:'Outro documento' };
+
+const tamanhoLegivel = b => b >= 1048576 ? (b / 1048576).toFixed(1).replace('.', ',') + ' MB'
+                          : Math.max(1, Math.round(b / 1024)) + ' KB';
+
+/** Reduz imagem para no máximo 1600px e recomprime em JPEG. PDF passa direto. */
+async function comprimirImagem(arquivo, maxLado = 1600, qualidade = 0.75){
+  if(!arquivo.type.startsWith('image/')) return arquivo;
+  let bitmap;
+  try { bitmap = await createImageBitmap(arquivo); }
+  catch { return arquivo; }                      // formato que o navegador não abre: sobe como está
+  const escala = Math.min(1, maxLado / Math.max(bitmap.width, bitmap.height));
+  const tela = document.createElement('canvas');
+  tela.width = Math.round(bitmap.width * escala);
+  tela.height = Math.round(bitmap.height * escala);
+  tela.getContext('2d').drawImage(bitmap, 0, 0, tela.width, tela.height);
+  bitmap.close?.();
+  const blob = await new Promise(r => tela.toBlob(r, 'image/jpeg', qualidade));
+  if(!blob || blob.size >= arquivo.size) return arquivo;    // não piorar o que já estava bom
+  return new File([blob], arquivo.name.replace(/\.[^.]+$/, '') + '.jpg', { type:'image/jpeg' });
+}
+
+function validarAnexo(arquivo){
+  if(!ANEXO_TIPOS.includes(arquivo.type)) return 'Envie PDF ou imagem (JPG, PNG).';
+  if(arquivo.size > ANEXO_MAX_MB * 1048576) return `Arquivo acima de ${ANEXO_MAX_MB} MB.`;
+  return null;
+}
+
+/** Sobe os arquivos e registra cada um. Devolve quantos falharam. */
+async function enviarAnexos(solicitacaoIds, itens){
+  if(!itens.length || !solicitacaoIds.length) return { enviados:0, falhas:[] };
+  let enviados = 0; const falhas = [];
+  for(const it of itens){
+    const arquivo = await comprimirImagem(it.arquivo);
+    const ext = (arquivo.name.match(/\.([A-Za-z0-9]+)$/) || [, 'bin'])[1].toLowerCase();
+    for(const sid of solicitacaoIds){
+      /* O mesmo documento vale para todos os procedimentos pedidos na mesma
+         consulta, então ele é anexado a cada solicitação gerada. */
+      const caminho = `${sid}/${crypto.randomUUID()}.${ext}`;
+      try {
+        const { error } = await sb.storage.from('anexos')
+          .upload(caminho, arquivo, { contentType: arquivo.type, upsert:false });
+        if(error) throw error;
+        await q(sb.from('anexos').insert({
+          solicitacao_id: sid, caminho, nome_original: it.arquivo.name,
+          tipo: arquivo.type, tamanho: arquivo.size, documento: it.documento }));
+        enviados++;
+      } catch(e){
+        falhas.push(it.arquivo.name);
+        registrarErro(e, 'enviarAnexos');
+      }
+    }
+  }
+  return { enviados, falhas };
+}
+
+/** Abre o anexo numa aba nova, por URL assinada de validade curta. */
+async function abrirAnexo(a){
+  registrarAcesso(a.paciente_id, 'abertura de anexo');
+  const { data, error } = await sb.storage.from('anexos').createSignedUrl(a.caminho, 120);
+  if(error || !data?.signedUrl){
+    toast('Não foi possível abrir o arquivo. Tente de novo.', 'err');
+    return registrarErro(error || new Error('sem URL'), 'abrirAnexo');
+  }
+  window.open(data.signedUrl, '_blank', 'noopener');
+}
+
+/** Lista de anexos de uma solicitação, com botão de abrir. */
+function listaAnexos(lista, id = uid('ax')){
+  if(!lista.length){
+    return alerta('warn', 'Nenhum documento anexado. O regulador vai analisar sem ver o pedido médico.', 'Sem anexo');
+  }
+  return `<ul class="anexos" id="${id}">${lista.map(a => `<li>
+    <span class="ic" aria-hidden="true">${a.tipo === 'application/pdf' ? 'PDF' : 'IMG'}</span>
+    <span class="nm"><b>${h(a.nome_original)}</b>
+      <small>${h(DOCUMENTOS[a.documento] || a.documento)} · ${h(tamanhoLegivel(a.tamanho))} · ${fmtDataHora(a.created_at)}</small></span>
+    <button type="button" class="btn sm" data-abrir="${a.id}">Abrir</button></li>`).join('')}</ul>`;
+}
+
+function ligarAnexos(root, lista){
+  $$('[data-abrir]', root).forEach(b => b.onclick = () => {
+    const a = lista.find(x => String(x.id) === b.dataset.abrir);
+    if(a) abrirAnexo(a);
+  });
+}
+
 /* ---------------- etiquetas ---------------- */
 const badgePrio = (p, longo) => p ? `<span class="badge pr-${p}"><span class="s" aria-hidden="true">${PRIORIDADES[p].s}</span>${h(PRIORIDADES[p].l)}${longo ? ' — ' + h(PRIORIDADES[p].d) : ''}</span>` : '';
 function chaveStatus(x){
@@ -1229,7 +1330,7 @@ async function pgSolicitacao(el){
     el.innerHTML = estado({ tipo:'permissao', titulo:'Usuário sem unidade', texto:'Para registrar solicitações, seu usuário precisa estar vinculado a uma unidade. Peça ao administrador para fazer o vínculo em Usuários.' });
     return;
   }
-  const novoW = () => ({ etapa:1, max:1, pac:null, origem:S.perfil.unidade_id || '', data_pedido:fmtData(hojeISO()), profissional:'', crm:'', cid10:'',
+  const novoW = () => ({ etapa:1, max:1, pac:null, anexos:[], origem:S.perfil.unidade_id || '', data_pedido:fmtData(hojeISO()), profissional:'', crm:'', cid10:'',
     registro:'', itens:[], prioridade:'azul', justificativa:'' });
   let W = novoW(), abertas = [];
   const rasc = store.get(chaveRascunho());
@@ -1340,10 +1441,54 @@ async function pgSolicitacao(el){
     ...(!S.perfil.unidade_id ? [{ name:'registro', label:'Unidade de registro', type:'select', required:true, num:true,
       options: S.unidades.filter(u => u.ativo && u.tipo !== 'executante').map(u => ({ value:u.id, label:u.nome })), dica:'Unidade onde a solicitação está sendo registrada.' }] : []),
   ];
-  function etapa2(){ return formHtml(F_PEDIDO(), { origem:W.origem, data_pedido:W.data_pedido, cid10:W.cid10, profissional:W.profissional, crm:W.crm, registro:W.registro }, 'sw'); }
+  function etapa2(){
+    return formHtml(F_PEDIDO(), { origem:W.origem, data_pedido:W.data_pedido, cid10:W.cid10, profissional:W.profissional, crm:W.crm, registro:W.registro }, 'sw')
+      + `<div class="secao-t">Documentos</div>
+         <p class="muted" style="margin-top:0;font-size:13px">Anexe o pedido ou encaminhamento do médico, e os exames que o
+           regulador precisa ver. Sem isso ele analisa sem o documento, e o papel continua tendo que ir até a central.
+           Foto de celular é reduzida automaticamente antes de subir.</p>
+         <div class="field">
+           <label for="sw-arq" class="btn" style="width:max-content">Escolher arquivo</label>
+           <input type="file" id="sw-arq" accept=".pdf,.jpg,.jpeg,.png,.webp,image/*,application/pdf" multiple class="sr-only">
+           <span class="dica">PDF ou imagem, até ${ANEXO_MAX_MB} MB cada, no máximo ${ANEXO_MAX_POR_SOL} documentos.</span>
+           <p class="erro-msg hidden" id="sw-arq-e"></p>
+         </div>
+         <div id="sw-anexos"></div>`;
+  }
+
+  function renderAnexosEscolhidos(){
+    const box = $('#sw-anexos');
+    if(!box) return;
+    if(!W.anexos.length){ box.innerHTML = ''; return; }
+    box.innerHTML = `<ul class="anexos">${W.anexos.map((a, i) => `<li>
+      <span class="ic" aria-hidden="true">${a.arquivo.type === 'application/pdf' ? 'PDF' : 'IMG'}</span>
+      <span class="nm"><b>${h(a.arquivo.name)}</b><small>${h(tamanhoLegivel(a.arquivo.size))}</small></span>
+      <select data-doc="${i}" aria-label="Tipo do documento ${h(a.arquivo.name)}">
+        ${Object.entries(DOCUMENTOS).map(([v, l]) => `<option value="${v}" ${v === a.documento ? 'selected' : ''}>${h(l)}</option>`).join('')}
+      </select>
+      <button type="button" class="btn sm err-sec" data-rm="${i}">Remover</button></li>`).join('')}</ul>`;
+    $$('[data-rm]', box).forEach(b => b.onclick = () => { W.anexos.splice(+b.dataset.rm, 1); renderAnexosEscolhidos(); });
+    $$('[data-doc]', box).forEach(sl => sl.onchange = () => { W.anexos[+sl.dataset.doc].documento = sl.value; });
+  }
   function liga2(c){
     $$('input,select', c).forEach(i => i.addEventListener('change', () => { coletar(c); salvarRascunho(); }));
     ligarBuscaCID(c, 'sw-cid10');
+
+    const arq = $('#sw-arq', c), erro = $('#sw-arq-e', c);
+    if(arq) arq.onchange = () => {
+      const problemas = [];
+      for(const f of arq.files){
+        if(W.anexos.length >= ANEXO_MAX_POR_SOL){ problemas.push(`Máximo de ${ANEXO_MAX_POR_SOL} documentos.`); break; }
+        const msg = validarAnexo(f);
+        if(msg) problemas.push(`${f.name}: ${msg}`);
+        else W.anexos.push({ arquivo:f, documento: W.anexos.length ? 'exame' : 'pedido' });
+      }
+      arq.value = '';                       // permite reescolher o mesmo arquivo
+      erro.textContent = problemas.join(' ');
+      erro.classList.toggle('hidden', !problemas.length);
+      renderAnexosEscolhidos();
+    };
+    renderAnexosEscolhidos();
   }
 
   /* ---------- Etapa 3: procedimentos ---------- */
@@ -1460,6 +1605,11 @@ async function pgSolicitacao(el){
       cid10:(W.cid10 || '').replace('.', '') || null, prioridade:W.prioridade, justificativa:W.justificativa || null };
     try {
       const criadas = await q(sb.from('solicitacoes').insert(W.itens.map(pid => ({ ...base, procedimento_id:pid }))).select('id,protocolo,procedimento_id'));
+      /* Os anexos sobem DEPOIS do registro, porque o caminho no bucket é
+         derivado do id da solicitação e é dele que sai a regra de acesso.
+         Falha aqui não desfaz o registro: a solicitação existe e o
+         documento pode ser anexado de novo pelo detalhe dela. */
+      const envio = await enviarAnexos(criadas.map(c => c.id), W.anexos);
       excluirRascunho(); atualizarContadores();
       const pac = W.pac, agendaveis = criadas.filter(c => !procExige(c.procedimento_id));
       el.innerHTML = `<section class="card" aria-labelledby="ok-t">
@@ -1469,6 +1619,8 @@ async function pgSolicitacao(el){
           ${criadas.map(c => `<tr><td data-label="Protocolo"><b>${h(c.protocolo)}</b></td><td data-label="Procedimento">${h(nomeProc(c.procedimento_id))}</td>
             <td data-label="Próximo passo">${procExige(c.procedimento_id) ? `${badgeSt('regulacao')} <span class="sub-linha">O regulador vai analisar; a unidade acompanha em Solicitações.</span>` : `${badgeSt('pendente')} <span class="sub-linha">Pode ser agendado agora.</span>`}</td></tr>`).join('')}
         </tbody></table></div>
+        ${envio.falhas.length ? alerta('err', `Não foi possível anexar: <b>${h([...new Set(envio.falhas)].join(', '))}</b>. A solicitação foi registrada; abra o detalhe dela para anexar de novo.`, 'Anexo não enviado') : ''}
+        ${envio.enviados ? `<p class="muted" style="margin-top:10px">${num(envio.enviados)} documento(s) anexado(s).</p>` : ''}
         <p class="muted" style="margin-top:10px">Informe os números de protocolo ao paciente para acompanhamento.</p>
         <div class="acoes" style="margin-top:12px">
           ${agendaveis.length && pode('agendamento') ? `<a class="btn pri lg" href="#/agendamento?pac=${pac.id}">Agendar agora ›</a>` : ''}
@@ -1666,6 +1818,7 @@ async function abrirSolicitacao(id, depois){
         <div><dt>Registrada em</dt><dd>${h(s.unidade_solicitante_nome)}</dd></div>
       </dl>
       <div class="field"><span class="lbl">Justificativa clínica</span>${s.justificativa ? `<div class="box">${h(s.justificativa)}</div>` : '<p class="muted">Não informada.</p>'}</div>
+      <div class="field"><span class="lbl">Documentos anexados</span>${listaAnexos(anexos, 'det-anexos')}</div>
       ${s.data_regulacao ? `<h3 class="secao-t">Regulação</h3><dl class="dl"><div><dt>Regulador</dt><dd>${h(s.regulador_nome || '—')}</dd></div><div><dt>Data</dt><dd>${fmtDataHora(s.data_regulacao)}</dd></div>
         ${s.parecer ? `<div style="grid-column:1/-1"><dt>Parecer</dt><dd>${h(s.parecer)}</dd></div>` : ''}</dl>` : ''}
       ${s.vaga_data ? `<h3 class="secao-t">Agendamento</h3>
@@ -1677,6 +1830,7 @@ async function abrirSolicitacao(id, depois){
         ${x.observacao ? `<div>${h(x.observacao)}</div>` : ''}</li>`).join('')}</ol>`
   });
   const vf = $('#ver-ficha', m); if(vf) vf.onclick = () => { m.close(); fichaPaciente(s.paciente_id, 'historico'); };
+  ligarAnexos(m, anexos);
 }
 
 /* Cancelar: explica o efeito e exige motivo */
@@ -1769,6 +1923,7 @@ async function pgRegulacao(el){
         <div><dt>Solicitante</dt><dd>${h(s.profissional_solicitante || '—')} ${h(s.crm_solicitante || '')}</dd></div>
       </dl>
       <div class="field"><span class="lbl">Justificativa clínica</span>${s.justificativa ? `<div class="box">${h(s.justificativa)}</div>` : '<p class="muted">Não informada.</p>'}</div>
+      <div class="field"><span class="lbl">Documentos anexados</span>${listaAnexos(anexos, 'reg-anexos')}</div>
       <h3 class="secao-t">Paciente</h3>
       <dl class="dl"><div><dt>Idade</dt><dd>${idade(s.paciente_nascimento)} anos (${fmtData(s.paciente_nascimento)})</dd></div>
         <div><dt>Sexo</dt><dd>${{F:'Feminino',M:'Masculino',I:'Não informado'}[s.paciente_sexo] || '—'}</dd></div>
@@ -1796,6 +1951,7 @@ async function pgRegulacao(el){
         </div>` : `<div class="acoes"><button type="button" class="btn" id="rg-abrir">Abrir detalhes completos</button>
           ${casaStatus(s, 'agendar') && pode('agendamento') ? `<a class="btn pri" href="#/agendamento?sol=${s.id}&pac=${s.paciente_id}">Agendar ›</a>` : ''}</div>`}`;
     $('#rg-abrir', det).onclick = () => abrirSolicitacao(s.id, async () => { await carregar(); filtrar(); });
+    ligarAnexos(det, anexos);
     $$('[data-acao]', det).forEach(b => b.onclick = () => acao(b.dataset.acao, s, b));
     if(rolar && matchMedia('(max-width:1100px)').matches) det.scrollIntoView({ behavior:'smooth', block:'start' });
   }

@@ -75,6 +75,14 @@ jobs:
           $PSQLF -f banco-de-dados/schema.sql
           psql -h localhost -U postgres -d fluxo -v ON_ERROR_STOP=1 -f banco-de-dados/testes/fluxo.sql
 
+      - name: Testes de RLS (isolamento entre unidades e perfis)
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -q -c "create database rls"
+          PSQLR="psql -h localhost -U postgres -d rls -v ON_ERROR_STOP=1 -q"
+          $PSQLR -f ferramentas/stub-supabase.sql
+          $PSQLR -f banco-de-dados/schema.sql
+          psql -h localhost -U postgres -d rls -v ON_ERROR_STOP=1 -f banco-de-dados/testes/rls.sql
+
       - name: Conferir que as restrições de CPF e CNS barram documento inválido
         run: |
           $PSQL -c "insert into unidades (nome, tipo) values ('UBS CI', 'solicitante');"

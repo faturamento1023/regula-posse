@@ -55,6 +55,15 @@ node ferramentas/verificar-csp.mjs     # nada de script inline, origens conferem
 node ferramentas/verificar-migracoes.mjs
 ```
 
+E, contra um Postgres com o stub do Supabase aplicado:
+
+```sh
+psql -f banco-de-dados/testes/fluxo.sql   # regras de negócio
+psql -f banco-de-dados/testes/rls.sql     # isolamento entre unidades e perfis
+```
+
+**Por que os testes de RLS ficam num arquivo separado:** `fluxo.sql` roda como dono das tabelas, e no Postgres o dono ignora row level security. Ele verifica regra de negócio e `grant`, mas **não** verifica as políticas — uma política errada passaria despercebida. Em `rls.sql` todo teste de visibilidade roda com `set role authenticated`, que é o papel que o cliente usa de verdade.
+
 O mesmo roda no CI (`.github/workflows/ci.yml`), que ainda aplica o schema e as migrações num Postgres limpo e confere que as restrições de CPF e CNS barram documento inválido.
 
 ### Regras que o projeto segue
@@ -130,6 +139,18 @@ O médico que **assina o pedido** segue como texto livre de propósito: costuma 
 O **CBO** mora no profissional, não no procedimento, porque o elemento do MIRA é "especialidade médica do executante". A coluna `procedimentos.cbo` continua existindo como recurso para vaga sem profissional vinculado.
 
 A vaga guarda o id **e** o nome do profissional. A cópia do nome é intencional: se o cadastro for renomeado depois, a guia já impressa continua batendo com o papel que o paciente tem na mão.
+
+## Anexos
+
+A solicitação aceita o **pedido ou encaminhamento do médico** e os **exames**, anexados na etapa 2 do registro. Sem isso o regulador decide sem ver o documento que fundamenta o pedido — ele lê uma justificativa digitada pela atendente, que leu o papel do médico — e o papel continua tendo que viajar até a central, de modo que o sistema não substitui o processo em papel, vira mais uma etapa em cima dele.
+
+Os arquivos vão para um bucket **privado** do Storage. A leitura é sempre por URL assinada de validade curta, e o acesso é decidido pelo RLS da solicitação: quem enxerga a solicitação enxerga os anexos dela, e quem não enxerga recebe zero. A regra fica num lugar só e não é repetida na política do Storage.
+
+Imagem é reduzida para no máximo 1600 px e recomprimida em JPEG **no navegador, antes de subir** — foto de pedido tirada com celular passa de 3 MB, e o armazenamento do plano é limitado. PDF sobe como está: recomprimir PDF no cliente arrisca perder legibilidade de exame.
+
+Limites: PDF ou imagem, até 8 MB por arquivo e 5 documentos por solicitação.
+
+Os anexos sobem **depois** do registro, porque o caminho no bucket é derivado do id da solicitação e é dele que sai a regra de acesso. Falha no envio não desfaz o registro: a solicitação existe e o documento pode ser anexado de novo.
 
 ## Catálogo CID-10
 
