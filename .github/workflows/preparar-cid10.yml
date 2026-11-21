@@ -125,5 +125,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/cid10
           git commit -m "Prepara catálogo CID-10" || exit 0
-          git pull --rebase origin main
-          git push origin main
+          # Empurra para o branch em que o workflow rodou, e não para "main"
+          # fixo: rodando a partir de um branch, o push para main falha — foi
+          # o que aconteceu na primeira execução.
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin HEAD:"${{ github.ref_name }}"
