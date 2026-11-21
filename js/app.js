@@ -2225,7 +2225,7 @@ function imprimirGuia(s){
   registrarAcesso(s.paciente_id, 'impressão de guia');
   const w = window.open('', '_blank');
   if(!w){ toast('O navegador bloqueou a janela de impressão. Permita pop-ups para este arquivo e tente de novo.', 'err'); return; }
-  const logo = new URL('assets/regula-posse-logo.svg', location.href).href;
+  const logo = new URL('assets/regula-posse-emblema.png', location.href).href;
   /* QR com o endereço de acompanhamento. Leva só o protocolo: a data de
      nascimento continua sendo pedida na tela, então guia perdida ou
      fotografada não abre a situação de ninguém. O SVG é gerado aqui, sem
@@ -3311,7 +3311,7 @@ async function pgRelatorios(el){
 
     const filtrosTxt = [loc ? 'Local: ' + nomeUnidade(+loc) : 'Todos os locais', proc ? 'Procedimento: ' + nomeProc(+proc) : 'Todos os procedimentos', orig ? 'Origem: ' + nomeUnidade(+orig) : 'Todas as origens'].join(' · ');
     $('#r-out').innerHTML = `
-      <div class="print-only" style="margin-bottom:8px"><img src="assets/regula-posse-logo.svg" alt="Regula Posse" style="height:36px"><h2 style="margin:4px 0">${h(ORGAO)} — Relatório de Regulação</h2></div>
+      <div class="print-only" style="margin-bottom:8px"><img src="assets/regula-posse-emblema.png" alt="Regula Posse" style="height:36px"><h2 style="margin:4px 0">${h(ORGAO)} — Relatório de Regulação</h2></div>
       <div class="periodo"><span>Período: <b>${fmtData(de)} a ${fmtData(ate)}</b></span><span>${h(filtrosTxt)}</span><span>Emitido em ${fmtDataHora(new Date())} por ${h(S.perfil.nome)}</span></div>
       <div class="kpis">
         ${kpi({ l:'Solicitações registradas', v:reg.length, s:'criadas no período' })}
