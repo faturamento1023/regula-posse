@@ -1600,7 +1600,7 @@ begin
        and (p_ate is null or atualizado_em::date <= p_ate)
      order by atualizado_em;
 end
-$;
+$$;
 
 -- ---------------------------------------------------------------------
 --  4. RETENÇÃO
