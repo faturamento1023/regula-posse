@@ -727,14 +727,14 @@ const ROTAS = {
   confirmacao:  { t:'Confirmação de atendimento', ic:'confirmacao',   g:'Atendimento',    papeis:['admin','agendador','regulador','executante'],  r:() => pgConfirmacao, cnt:'confirmar' },
   regulacao:    { t:'Análise regulatória',        ic:'regulacao',     g:'Regulação',      papeis:['admin','regulador'],                           r:() => pgRegulacao, cnt:'regular' },
   fila:         { t:'Fila de espera',             ic:'fila',          g:'Regulação',      papeis:['admin','regulador','agendador'],               r:() => pgFila },
+  vulnerabilidade:{ t:'Critérios de vulnerabilidade', ic:'regulacao', g:'Regulação',   papeis:['admin'],                                       r:() => pgVulnerabilidade },
   agendas:      { t:'Agendas e vagas',            ic:'agendas',       g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgAgendas },
   locais:       { t:'Locais e unidades',          ic:'locais',        g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgLocais },
   procedimentos:{ t:'Procedimentos',              ic:'procedimentos', g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgProcedimentos },
   pacientes:    { t:'Pacientes',                  ic:'pacientes',     g:'Administração',  papeis:['admin','solicitante','agendador','regulador'], r:() => pgPacientes },
-  vulnerabilidade:{ t:'Critérios de vulnerabilidade', ic:'regulacao', g:'Regulação',   papeis:['admin'],                                       r:() => pgVulnerabilidade },
+  usuarios:     { t:'Usuários',                   ic:'usuarios',      g:'Administração',  papeis:['admin'],                                       r:() => pgUsuarios },
   mira:         { t:'Envio ao Ministério (MIRA)', ic:'relatorios',    g:'Administração',  papeis:['admin','regulador'],                           r:() => pgMira },
   auditoria:    { t:'Auditoria',                  ic:'usuarios',      g:'Administração',  papeis:['admin'],                                       r:() => pgAuditoria },
-  usuarios:     { t:'Usuários',                   ic:'usuarios',      g:'Administração',  papeis:['admin'],                                       r:() => pgUsuarios },
   relatorios:   { t:'Relatórios',                 ic:'relatorios',    g:'Relatórios',     papeis:TODOS,                                         r:() => pgRelatorios },
 };
 const pode = k => ROTAS[k] && ROTAS[k].papeis.includes(papel());
@@ -1504,7 +1504,14 @@ const COLS_SOL = {
   procedimento:{ l:'Procedimento', f:s => `${h(s.procedimento_nome)} ${s.exige_regulacao ? tagReg() : ''}`, v:s => s.procedimento_nome },
   origem:{ l:'Origem', f:s => `${h(s.unidade_origem_nome || s.unidade_solicitante_nome)}<small>pedido ${fmtData(s.data_pedido)}</small>`, v:s => s.unidade_origem_nome },
   risco:{ l:'Risco', f:s => badgePrio(s.prioridade), v:s => s.peso_prioridade },
-  espera:{ l:'Espera', n:1, f:s => `${s.dias_espera} dia(s)`, v:s => s.dias_espera },
+  /* Duas medidas na mesma coluna. A de cima é a que ordena a fila, contada
+     do lançamento no sistema; a de baixo é a espera real do paciente, do
+     pedido médico. Mostrar só uma esconde o tempo que o paciente esperou e
+     a fila não conta — era exatamente o que acontecia nesta tela. */
+  espera:{ l:'Espera', n:1, v:s => s.dias_espera,
+    f:s => `${num(s.dias_espera)} dia(s)` + (
+      s.dias_desde_pedido != null && s.dias_desde_pedido !== s.dias_espera
+        ? `<small${s.dias_ate_insercao >= 7 ? ' class="atraso"' : ''}>${num(s.dias_desde_pedido)} desde o pedido</small>` : '') },
   situacao:{ l:'Situação', f:s => `${badgeSt(s)} ${['pendente','autorizada','devolvida'].includes(s.status) ? tagIncompleto(s) : ''}`, v:s => rotuloStatus(s) },
   agenda:{ l:'Agendamento', f:s => s.vaga_data ? `${fmtData(s.vaga_data)} ${fmtHora(s.vaga_hora)}<small>${h(s.unidade_executante_nome)} · guia ${h(s.numero_guia)}</small>` : '—', v:s => s.vaga_data || '' },
 };

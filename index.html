@@ -52,6 +52,11 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px soli
 .pular{position:absolute;left:8px;top:-60px;z-index:200;background:var(--foco);color:#000;padding:10px 14px;border-radius:6px;font-weight:700;text-decoration:none}
 .pular:focus{top:8px}
 .muted{color:var(--muted)}
+/* Espera do pedido médico muito maior que a da fila: a unidade demorou a
+   lançar e o paciente perdeu esse tempo sem ninguém ver. */
+td small.atraso{color:var(--warn);font-weight:600}
+/* a segunda espera cabe numa linha; quebrada, engorda a altura de toda a lista */
+td.n small{white-space:nowrap}
 .nowrap{white-space:nowrap}
 .spacer{flex:1}
 
