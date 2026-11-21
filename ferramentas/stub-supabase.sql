@@ -8,10 +8,14 @@ do $$ begin create role anon;          exception when duplicate_object then null
 do $$ begin create role authenticated; exception when duplicate_object then null; end $$;
 
 create schema if not exists auth;
+-- Os campos espelham o que o schema realmente usa de auth.users: o
+-- trigger handle_new_user() lê raw_user_meta_data->>'nome'.
 create table if not exists auth.users (
-  id    uuid primary key default gen_random_uuid(),
-  email text
+  id                  uuid primary key default gen_random_uuid(),
+  email               text,
+  raw_user_meta_data  jsonb not null default '{}'::jsonb
 );
+alter table auth.users add column if not exists raw_user_meta_data jsonb not null default '{}'::jsonb;
 create or replace function auth.uid() returns uuid
   language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
 create or replace function auth.role() returns text
