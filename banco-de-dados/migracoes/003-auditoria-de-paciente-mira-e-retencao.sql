@@ -226,7 +226,7 @@ join unidades      us on us.id = s.unidade_solicitante_id
 left join vagas    v  on v.id  = s.vaga_id
 left join unidades ue on ue.id = v.unidade_executante_id;
 
-grant select on vw_mira to authenticated;
+revoke all on vw_mira from anon, authenticated;
 
 /* O que ainda impede o envio. Sem isto, descobrir que 300 solicitações
    não têm CID-10 aconteceria no meio da transmissão, e não antes. */
@@ -266,16 +266,22 @@ $$;
    por data de atualização, para um reenvio pegar o que mudou. */
 create or replace function mira_lote(p_de date default null, p_ate date default null)
 returns setof vw_mira
-language sql stable security definer set search_path = public as $$
-  select * from vw_mira
-   where codigo_procedimento is not null
-     and identificador_paciente is not null
-     and cnes_solicitante is not null
-     and motivo_solicitacao is not null
-     and (p_de  is null or atualizado_em::date >= p_de)
-     and (p_ate is null or atualizado_em::date <= p_ate)
-   order by atualizado_em
-$$;
+language plpgsql stable security definer set search_path = public as $
+begin
+  if not tem_papel('admin','regulador') then
+    raise exception 'Acesso à exportação MIRA restrito à regulação.' using errcode = '42501';
+  end if;
+  return query
+    select * from vw_mira
+     where codigo_procedimento is not null
+       and identificador_paciente is not null
+       and cnes_solicitante is not null
+       and motivo_solicitacao is not null
+       and (p_de  is null or atualizado_em::date >= p_de)
+       and (p_ate is null or atualizado_em::date <= p_ate)
+     order by atualizado_em;
+end
+$;
 
 -- ---------------------------------------------------------------------
 --  4. RETENÇÃO
