@@ -1,0 +1,24 @@
+# Nada de dependência versionada: o projeto não tem build nem bundler.
+node_modules/
+package-lock.json
+
+# Sistema operacional e editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Nunca versionar: chave privada, chave de serviço, dump com dado de paciente
+.env
+.env.*
+*.pem
+*.key
+service-role*
+*.dump
+*.backup
+dump-*.sql
+
+# Trabalho local
+*.log
+/tmp/
