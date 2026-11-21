@@ -121,6 +121,16 @@ Os três ficam em **Administração → Auditoria**, visíveis só para administ
 
 Um limite do log de acesso que precisa ficar claro: o cliente lê a tabela `pacientes` direto pelo PostgREST, então ele **não** intercepta toda consulta ao banco. Registra abertura deliberada de cadastro pela aplicação — ficha, detalhe de solicitação e impressão de guia. Interceptar toda leitura exigiria tirar o acesso direto à tabela e passar tudo por função; está na lista de pendências.
 
+## Profissionais
+
+**Administração → Profissionais** cadastra quem **atende**: os nomes que entram nas agendas e saem impressos na guia do paciente. Antes era texto livre na criação de agenda, com autocompletar montado a partir do que já havia sido digitado — ou seja, repetia junto os erros de digitação, e "Dr. João Batista", "João B." e "JOAO BATISTA" viravam três profissionais em qualquer relatório.
+
+O médico que **assina o pedido** segue como texto livre de propósito: costuma ser de fora da rede do município, às vezes de outro estado, e exigir cadastro prévio travaria o registro na recepção.
+
+O **CBO** mora no profissional, não no procedimento, porque o elemento do MIRA é "especialidade médica do executante". A coluna `procedimentos.cbo` continua existindo como recurso para vaga sem profissional vinculado.
+
+A vaga guarda o id **e** o nome do profissional. A cópia do nome é intencional: se o cadastro for renomeado depois, a guia já impressa continua batendo com o papel que o paciente tem na mão.
+
 ## Envio ao Ministério (MIRA)
 
 **Administração → Envio ao Ministério** monta os 16 elementos do Modelo de Informação da Regulação Assistencial e aponta o que impede o envio de cada registro — solicitação sem CID-10, procedimento sem código SIGTAP, unidade sem CNES, paciente sem CPF e sem CNS.

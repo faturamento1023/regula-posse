@@ -39,7 +39,7 @@ const store = {
 };
 
 let sb = null;
-const S = { user:null, perfil:null, unidades:[], procedimentos:[], unProc:[], profs:[] };
+const S = { user:null, perfil:null, unidades:[], procedimentos:[], unProc:[], profs:[], profissionais:[] };
 
 const PRIORIDADES = {
   vermelho:{ l:'Vermelho', d:'Emergência', c:'var(--p-vermelho)', s:'◆' },
@@ -164,6 +164,13 @@ function esperaDupla(s){
 const tagReg = () => `<span class="tag" title="Este procedimento passa pela análise regulatória antes do agendamento">Exige regulação</span>`;
 const nomeUnidade = id => S.unidades.find(u => u.id === id)?.nome || '—';
 const nomeProc = id => S.procedimentos.find(p => p.id === id)?.nome || '—';
+const CONSELHOS = { CRM:'CRM', COREN:'COREN', CRO:'CRO', CREFITO:'CREFITO', CRP:'CRP', CRN:'CRN', CRFa:'CRFa', CRF:'CRF', OUTRO:'Outro' };
+/* "Dr. Fulano — CRM-GO 12345 · Cardiologia": o registro no conselho é o que
+   distingue dois profissionais de mesmo nome. */
+const rotuloProf = p => !p ? '—' : p.nome
+  + (p.numero_conselho ? ` — ${p.conselho}${p.uf_conselho ? '-' + p.uf_conselho : ''} ${p.numero_conselho}` : '')
+  + (p.especialidade ? ` · ${p.especialidade}` : '');
+const profsAtivos = () => S.profissionais.filter(p => p.ativo);
 const procExige = id => !!S.procedimentos.find(p => p.id === id)?.exige_regulacao;
 const papel = () => S.perfil?.papel;
 const can = (...p) => p.includes(papel());
@@ -568,12 +575,13 @@ const REFS_VALIDADE_MS = 5 * 60 * 1000;
 let refsEm = 0;
 
 async function carregarRefs(){
-  const [u, p, up] = await Promise.all([
+  const [u, p, up, pf] = await Promise.all([
     q(sb.from('unidades').select('*').order('nome')),
     carregarProcedimentos(),
-    q(sb.from('unidade_procedimentos').select('*'))
+    q(sb.from('unidade_procedimentos').select('*')),
+    q(sb.from('profissionais').select('*').order('nome')),
   ]);
-  S.unidades = u; S.procedimentos = p; S.unProc = up;
+  S.unidades = u; S.procedimentos = p; S.unProc = up; S.profissionais = pf;
   refsEm = Date.now();
 }
 /* Assinatura barata: pega inclusão, exclusão e troca de situação. Uma
@@ -582,6 +590,7 @@ const assinaturaRefs = () => [
   S.unidades.length, S.unidades.filter(u => u.ativo).length,
   S.procedimentos.length, S.procedimentos.filter(p => p.ativo).length,
   S.unProc.length,
+  S.profissionais.length, S.profissionais.filter(p => p.ativo).length,
 ].join('|');
 
 async function recarregarRefs(){
@@ -731,6 +740,7 @@ const ROTAS = {
   agendas:      { t:'Agendas e vagas',            ic:'agendas',       g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgAgendas },
   locais:       { t:'Locais e unidades',          ic:'locais',        g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgLocais },
   procedimentos:{ t:'Procedimentos',              ic:'procedimentos', g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgProcedimentos },
+  profissionais:{ t:'Profissionais',              ic:'usuarios',      g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgProfissionais },
   pacientes:    { t:'Pacientes',                  ic:'pacientes',     g:'Administração',  papeis:['admin','solicitante','agendador','regulador'], r:() => pgPacientes },
   usuarios:     { t:'Usuários',                   ic:'usuarios',      g:'Administração',  papeis:['admin'],                                       r:() => pgUsuarios },
   mira:         { t:'Envio ao Ministério (MIRA)', ic:'relatorios',    g:'Administração',  papeis:['admin','regulador'],                           r:() => pgMira },
@@ -2396,8 +2406,12 @@ function gerarVagas(execs, depois, pre={}){
       <div class="grid">
         <div class="field s2"><label for="g-uni">Local de atendimento *</label><select id="g-uni">${optList(execs, pre.unidade || execs[0].id)}</select></div>
         <div class="field s2"><label for="g-proc">Procedimento *</label><select id="g-proc"></select></div>
-        <div class="field full"><label for="g-prof">Profissional</label><input id="g-prof" list="g-dl-prof" value="${h(pre.prof || '')}" placeholder="Ex.: Dr. Fulano de Tal — CRM-GO 0000">
-          <datalist id="g-dl-prof">${(S.profs || []).map(p => `<option value="${h(p)}">`).join('')}</datalist></div>
+        <div class="field full"><label for="g-prof">Profissional</label>
+          <select id="g-prof">
+            <option value="">Sem profissional definido</option>
+            ${profsAtivos().map(p => `<option value="${p.id}" ${String(p.id) === String(pre.prof || '') ? 'selected' : ''}>${h(rotuloProf(p))}</option>`).join('')}
+          </select>
+          ${profsAtivos().length ? '' : `<span class="dica">Nenhum profissional cadastrado ainda. Cadastre em <b>Administração → Profissionais</b> para a agenda sair com o nome certo na guia.</span>`}</div>
       </div>
       <div class="sec-t">Quando o profissional atende?</div>
       <div class="seg" id="g-modo" role="group" aria-label="Forma de repetição">
@@ -2422,9 +2436,10 @@ function gerarVagas(execs, depois, pre={}){
           + `<optgroup label="${ja.length ? 'Outros procedimentos' : 'Procedimentos'}">${optList(outros)}</optgroup>`;
       };
       const carregarExist = async () => {
-        const u = +$m('#g-uni').value, p = +$m('#g-proc').value, prof = $m('#g-prof').value.trim() || null;
-        const l = await fetchAll(() => sb.from('vagas').select('data,profissional').eq('unidade_executante_id', u).eq('procedimento_id', p).gte('data', hoje).order('id'), 20000);
-        st.existentes = new Set(l.filter(v => (v.profissional || null) === prof).map(v => v.data));
+        const u = +$m('#g-uni').value, p = +$m('#g-proc').value;
+        const prof = $m('#g-prof').value ? +$m('#g-prof').value : null;
+        const l = await fetchAll(() => sb.from('vagas').select('data,profissional_id').eq('unidade_executante_id', u).eq('procedimento_id', p).gte('data', hoje).order('id'), 20000);
+        st.existentes = new Set(l.filter(v => (v.profissional_id ?? null) === prof).map(v => v.data));
         if(st.modo === 'avulsas') renderQuando(); else prev();
       };
 
@@ -2591,7 +2606,7 @@ function gerarVagas(execs, depois, pre={}){
       $m('#g-fer').onchange = prev;
       $m('#g-uni').onchange = () => { atualizaProcs(); carregarExist(); };
       $m('#g-proc').onchange = carregarExist;
-      $m('#g-prof').oninput = debounce(carregarExist, 400);
+      $m('#g-prof').onchange = carregarExist;
       st.prev = prev; st.calcular = calcular;
       atualizaProcs(); renderTurnos(); renderQuando(); carregarExist();
     },
@@ -2602,7 +2617,8 @@ function gerarVagas(execs, depois, pre={}){
       const faixas = st.turnos.map(t => [minutos(t.ini), t.tipo === 'chegada' ? minutos(t.ini) + 1 : minutos(t.fim)]).sort((a, b) => a[0] - b[0]);
       for(let i = 1; i < faixas.length; i++) if(faixas[i][0] < faixas[i-1][1]) throw new Error('Os turnos estão com horários sobrepostos.');
       const res = await q(sb.rpc('gerar_vagas', {
-        p_unidade: +$('#g-uni', m).value, p_procedimento: +$('#g-proc', m).value, p_profissional: $('#g-prof', m).value,
+        p_unidade: +$('#g-uni', m).value, p_procedimento: +$('#g-proc', m).value,
+        p_profissional: $('#g-prof', m).value ? +$('#g-prof', m).value : null,
         p_datas: r.validas,
         p_turnos: st.turnos.map(t => ({ hora_ini:t.ini, hora_fim:t.tipo === 'chegada' ? t.ini : t.fim, intervalo:t.tipo === 'chegada' ? 0 : +t.int, qtd:+t.qtd }))
       }));
@@ -2882,6 +2898,44 @@ function pgVulnerabilidade(el){
     colunas:[
       { l:'Critério', f:d => `<b>${h(d.nome)}</b>${d.descricao ? `<small>${h(d.descricao)}</small>` : ''}`, v:d => d.nome },
       { l:'Peso', n:true, f:d => num(d.peso), v:d => d.peso } ] });
+}
+
+function pgProfissionais(el){
+  el.innerHTML = alerta('info',
+    'Profissionais que <b>atendem</b> — os que aparecem nas agendas e na guia do paciente. '
+    + 'O médico que <b>assina o pedido</b> continua sendo digitado na solicitação, sem cadastro prévio: '
+    + 'ele costuma ser de fora da rede e exigir cadastro travaria a recepção.<br><br>'
+    + 'O <b>CBO</b> é o que o MIRA pede como especialidade do executante, e é obrigatório para '
+    + 'procedimentos dos grupos 03 e 04 da SIGTAP. Sem ele, o registro vai para o Ministério incompleto.',
+    'Quem entra aqui') + '<div id="crud"></div>';
+
+  return crud({ el: $('#crud', el), tabela:'profissionais', titulo:'profissional', artigo:'o',
+    efeitoDesativar:'Deixa de aparecer na criação de novas agendas; as vagas já geradas continuam com o nome dele.',
+    campos:[
+      { name:'nome', label:'Nome', required:true, span:2 },
+      { name:'especialidade', label:'Especialidade', span:2, dica:'Como aparece para o paciente. Ex.: Cardiologia' },
+      { name:'conselho', label:'Conselho', type:'select', required:true, empty:false, options: opts(CONSELHOS) },
+      { name:'numero_conselho', label:'Número no conselho', dica:'Só os números, sem o UF' },
+      { name:'uf_conselho', label:'UF do conselho', type:'select', options: UFS.map(u => ({ value:u, label:u })) },
+      { name:'cbo', label:'CBO', attrs:'inputmode="numeric" maxlength="6"', dica:'6 números. Ex.: 225120 para cardiologista' },
+      { name:'unidade_id', label:'Local principal', type:'select', span:2,
+        options: locaisExec().map(u => ({ value:u.id, label:u.nome })),
+        dica:'Opcional. Serve de referência; não impede agenda em outro local.' },
+      { name:'ativo', label:'Situação', type:'checkbox', text:'Ativo' },
+    ],
+    validar:(o, err) => {
+      if(o.cbo && !/^\d{6}$/.test(o.cbo)) err('cbo', 'O CBO tem 6 números.');
+      if(o.numero_conselho && !/^\d{1,10}$/.test(dig(o.numero_conselho))) err('numero_conselho', 'Informe só os números do registro.');
+      if(o.numero_conselho && !o.uf_conselho) err('uf_conselho', 'Informe a UF do conselho junto com o número.');
+    },
+    colunas:[
+      { l:'Profissional', f:d => `<b>${h(d.nome)}</b>${d.especialidade ? `<small>${h(d.especialidade)}</small>` : ''}`, v:d => d.nome },
+      { l:'Conselho', f:d => d.numero_conselho
+          ? `${h(d.conselho)}${d.uf_conselho ? '-' + h(d.uf_conselho) : ''} ${h(d.numero_conselho)}`
+          : '<span class="tag inc">sem registro</span>', v:d => (d.numero_conselho || '') },
+      { l:'CBO', f:d => d.cbo ? h(d.cbo) : '<span class="tag inc">sem CBO</span>', v:d => d.cbo || '' },
+      { l:'Local principal', f:d => d.unidade_id ? h(nomeUnidade(d.unidade_id)) : '<span class="muted">—</span>', v:d => d.unidade_id || 0 },
+    ] });
 }
 
 function pgProcedimentos(el){

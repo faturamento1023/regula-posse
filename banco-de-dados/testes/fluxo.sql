@@ -332,3 +332,69 @@ begin
 end $$;
 
 select 'TESTES DA MIGRAÇÃO 003 PASSARAM' as resultado;
+
+-- =====================================================================
+--  CADASTRO DE PROFISSIONAIS (migração 004)
+-- =====================================================================
+do $$
+declare r jsonb; n int;
+begin
+  insert into profissionais (nome, conselho, numero_conselho, uf_conselho, cbo, especialidade, unidade_id)
+  values ('Dr. Teste Executante', 'CRM', '12345', 'GO', '225120', 'Cardiologia', 2);
+
+  -- o mesmo registro de conselho não pode entrar duas vezes
+  begin
+    insert into profissionais (nome, conselho, numero_conselho, uf_conselho)
+    values ('Outro Nome', 'CRM', '12345', 'GO');
+    raise exception 'conselho duplicado devia ser recusado';
+  exception when unique_violation then null;
+  end;
+
+  -- mas dois sem número de registro convivem
+  insert into profissionais (nome, conselho) values ('Sem Registro A', 'CRM');
+  insert into profissionais (nome, conselho) values ('Sem Registro B', 'CRM');
+
+  -- gerar_vagas mantém o formato de retorno do original e copia o nome
+  r := gerar_vagas(2, 1, 1, array[current_date + 30],
+         '[{"hora_ini":"08:00","hora_fim":"10:00","intervalo":30,"qtd":1}]'::jsonb);
+  if (r->>'vagas')::int <> 4 then raise exception 'esperadas 4 vagas, vieram %', r->>'vagas'; end if;
+  if r->'ignoradas' is null then raise exception 'o retorno perdeu o campo ignoradas'; end if;
+
+  select count(*) into n from vagas
+   where profissional_id = 1 and profissional = 'Dr. Teste Executante' and data = current_date + 30;
+  if n <> 4 then raise exception 'a vaga devia guardar o id e o nome do profissional'; end if;
+
+  -- intervalo zero continua criando todas no mesmo horário
+  r := gerar_vagas(2, 1, 1, array[current_date + 31],
+         '[{"hora_ini":"13:00","hora_fim":"13:00","intervalo":0,"qtd":5}]'::jsonb);
+  if (r->>'vagas')::int <> 5 then raise exception 'mutirão devia criar 5 vagas, criou %', r->>'vagas'; end if;
+
+  -- repetir a data devolve a data em ignoradas, sem duplicar vaga
+  r := gerar_vagas(2, 1, 1, array[current_date + 30],
+         '[{"hora_ini":"08:00","hora_fim":"09:00","intervalo":30,"qtd":1}]'::jsonb);
+  if jsonb_array_length(r->'ignoradas') <> 1 then raise exception 'data repetida devia ser ignorada'; end if;
+
+  -- profissional inativo ou inexistente é recusado
+  update profissionais set ativo = false where id = 2;
+  begin
+    perform gerar_vagas(2, 1, 2, array[current_date + 40],
+              '[{"hora_ini":"08:00","hora_fim":"09:00","intervalo":30,"qtd":1}]'::jsonb);
+    raise exception 'profissional inativo devia ser recusado';
+  exception when others then
+    if sqlerrm = 'profissional inativo devia ser recusado' then raise; end if;
+  end;
+end $$;
+
+-- o MIRA passa a usar o CBO do profissional, não o do procedimento
+do $$
+declare r record;
+begin
+  update procedimentos set cbo = '999999' where id = 1;
+  update solicitacoes set vaga_id = (select id from vagas where profissional_id = 1 limit 1) where id = 1;
+  select * into r from vw_mira where solicitacao_id = 1;
+  if r.cbo_executante <> '225120' then
+    raise exception 'o CBO devia vir do profissional (225120), veio %', r.cbo_executante;
+  end if;
+end $$;
+
+select 'TESTES DA MIGRAÇÃO 004 PASSARAM' as resultado;
