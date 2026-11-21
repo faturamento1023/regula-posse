@@ -36,10 +36,12 @@ Não há build nem bundler: a pasta é servida como está. Só é preciso Node p
 index.html                    casca da página e a folha de estilo
 js/app.js                     a aplicação
 js/util.js                    funções puras: escape, datas, máscaras, validações
+js/qr.js                      gerador de QR Code (modo byte, níveis L e M)
 test/                         testes (node --test), sem dependência externa
 ferramentas/                  verificadores do CI e scripts de manutenção
 banco-de-dados/schema.sql     estado atual do banco, para instalação nova
 banco-de-dados/migracoes/     o delta de cada versão, para banco em produção
+banco-de-dados/testes/        testes do fluxo de regulação, em SQL
 ```
 
 Antes de abrir um pull request:
@@ -75,9 +77,37 @@ Para fechar o `script-src` em `'self'` e deixar de depender do jsDelivr, rode `f
 
 Erro no navegador é gravado na tabela `erros` pela função `registrar_erro()`, visível só para administrador. Sem isso, "deu erro aqui" é irreproduzível: não há console aberto na recepção da unidade. Sequências de seis dígitos ou mais são mascaradas antes do envio, porque mensagem de erro do Postgres traz o valor que violou a restrição — que pode ser um CPF. O volume é limitado a 20 registros por usuário por hora, e `limpar_erros_antigos(dias)` apaga o que passou do prazo.
 
+## Acompanhamento pelo paciente
+
+Duas telas funcionam **sem login**, porque a Política Nacional de Regulação exige que o usuário acompanhe a própria situação e que a população veja as listas e os tempos de espera:
+
+- `#/acompanhar` — pede o número do protocolo e a data de nascimento do paciente, e mostra situação, procedimento, tempo desde o pedido médico, posição na fila e, se já agendada, data, hora e local.
+- `#/espera` — tempos médios por procedimento, agregados, sem nada pessoal.
+
+A guia impressa traz um **QR Code** que abre a primeira tela com o protocolo já preenchido. O QR é gerado por `js/qr.js`, dentro do navegador: nenhum serviço externo recebe o protocolo do paciente, e o CSP não permitiria essa chamada de todo modo.
+
+Os cuidados de privacidade dessa abertura, que é o primeiro caminho anônimo do banco:
+
+- A função devolve situação, procedimento, posição e o agendamento. **Nunca** nome, CPF, CNS, telefone ou endereço — quem consulta já sabe de quem se trata.
+- Exige protocolo **e** data de nascimento. O protocolo é sequencial e previsível, então sozinho não serve de segredo.
+- A data de nascimento ainda é segredo fraco, então há trava de volume: 10 tentativas por protocolo por hora e 60 no banco todo por minuto. Toda tentativa fica registrada em `consultas_publicas`, visível só para administrador.
+- Protocolo inexistente e data errada devolvem **exatamente a mesma resposta**. Distinguir os dois confirmaria a existência do protocolo.
+- A função devolve o erro no campo `resultado` em vez de usar `raise exception`. Isso não é estilo: `raise` desfaz a transação inteira, inclusive o registro da tentativa, e a trava de volume ficaria sem efeito nenhum.
+
+## As duas esperas
+
+`dias_espera` conta da data em que a solicitação foi lançada no sistema, e é o que ordena a fila. `dias_desde_pedido` conta da data do pedido médico, que é a espera real do paciente. `dias_ate_insercao` é a diferença: quanto a unidade demorou para lançar o pedido.
+
+A fila **não** foi reordenada para usar a data do pedido. Seria mais justo, mas mudaria retroativamente a posição de pacientes reais, e essa é decisão da regulação municipal, com data de corte definida — não de um deploy. O que o sistema faz é mostrar as duas medidas lado a lado, para o problema poder ser medido antes de ser decidido.
+
+## Vulnerabilidade
+
+A PNR-SUS manda a prioridade considerar risco, tempo de espera e vulnerabilidade, e atribui ao município definir os critérios. Então `criterios_vulnerabilidade` nasce **vazia**, como `CRITERIOS_RISCO` já nascia: sem critério cadastrado, o peso é zero e nada muda na fila. Quem cadastra é o administrador, em **Regulação → Critérios de vulnerabilidade**.
+
 ### Pendente
 
 - Dividir `js/app.js` por tela (`js/telas/*.js`), hoje ainda num arquivo só.
 - Mover a busca de pacientes e de procedimentos para consulta paginada no servidor: hoje os 5.068 procedimentos vão para a memória do navegador a cada login.
 - Registrar acesso de leitura a cadastro de paciente, não só as mudanças de situação das solicitações.
 - Escolher uma licença — sem arquivo `LICENSE`, outro município não pode reaproveitar o código com segurança jurídica.
+- **Envio de dados à RNDS no formato MIRA.** A Portaria GM/MS nº 6.656/2025 tornou obrigatório o envio dos dados de Regulação Assistencial ao Ministério da Saúde, e usar sistema próprio não dispensa isso — a portaria prevê expressamente sistemas próprios como mecanismo de envio. O schema já guarda quase todos os campos do modelo e as unidades já têm CNES, mas não há exportador. É o maior item em aberto; confirme o prazo aplicável com a coordenação de regulação.

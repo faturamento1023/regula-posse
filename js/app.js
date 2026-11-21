@@ -18,6 +18,7 @@ import {
   MASK, fCPF, fCNS, fTel, fCEP, cpfOculto, cnsOculto,
   validaCNS, validaCPF,
 } from './util.js';
+import { qrSVG } from './qr.js';
 /* =====================================================================
    CONFIGURAÇÃO LOCAL
    ===================================================================== */
@@ -134,6 +135,19 @@ const rotuloStatus = x => STATUS[chaveStatus(x)] || chaveStatus(x);
 const badgeSt = x => { const k = chaveStatus(x); const cls = k === 'regulacao' ? 'st-regulacao' : 'st-' + k;
   const rot = STATUS[k] || ({ livre:'Livre', ocupada:'Ocupada', bloqueada:'Bloqueada', ativo:'Ativo', inativo:'Inativo' }[k] || k);
   return `<span class="badge ${cls}"><span class="s" aria-hidden="true">${STATUS_ICO[k] || ''}</span>${h(rot)}</span>`; };
+/* As duas esperas. dias_espera conta do lançamento no sistema e é o que
+   ordena a fila; dias_desde_pedido conta do pedido médico, que é a espera
+   real do paciente. A diferença é tempo que o paciente esperou e a fila não
+   conta — mostrar isso lado a lado é o que permite medir o problema. */
+function esperaDupla(s){
+  if(s.dias_desde_pedido == null) return '';
+  const atraso = s.dias_ate_insercao;
+  const alto = atraso != null && atraso >= 7;
+  return `<p class="muted" style="margin:0 0 10px;font-size:13px">
+    Espera desde o pedido médico (${fmtData(s.data_pedido)}): <b>${num(s.dias_desde_pedido)} dia(s)</b>
+    · na fila, contada do lançamento: <b>${num(s.dias_espera)} dia(s)</b>
+    ${atraso ? `· <span class="${alto ? 'tag inc' : ''}">levou ${num(atraso)} dia(s) para ser lançada</span>` : ''}</p>`;
+}
 const tagReg = () => `<span class="tag" title="Este procedimento passa pela análise regulatória antes do agendamento">Exige regulação</span>`;
 const nomeUnidade = id => S.unidades.find(u => u.id === id)?.nome || '—';
 const nomeProc = id => S.procedimentos.find(p => p.id === id)?.nome || '—';
@@ -407,6 +421,16 @@ function registrarRecente(p){
 }
 const recentes = () => S.perfil ? (store.get('regula_recentes_' + S.perfil.id) || []) : [];
 
+/* Rotas que funcionam sem login. A PNR-SUS exige que o paciente acompanhe
+   a própria situação, e quem chega pelo QR da guia impressa não tem conta
+   no sistema. Tudo que estas telas leem passa por função do banco que
+   devolve o mínimo e registra a tentativa — ver a migração 002. */
+const ROTAS_PUBLICAS = { acompanhar: pgAcompanhar, espera: pgEspera };
+const rotaPublica = () => {
+  const k = (location.hash || '').replace(/^#\/?/, '').split('?')[0];
+  return ROTAS_PUBLICAS[k] ? k : null;
+};
+
 async function boot(){
   telaLogin();
   const cfg = window.REGULA_CONFIG;
@@ -423,9 +447,42 @@ async function boot(){
   sb.auth.onAuthStateChange(event => {
     if(event === 'SIGNED_OUT' && S.user) location.reload();
   });
+  // Tela pública pedida no endereço: abre sem exigir sessão.
+  const publica = rotaPublica();
+  if(publica){
+    await abrirPublica(publica);
+    window.addEventListener('hashchange', () => {
+      const p = rotaPublica();
+      if(p) abrirPublica(p); else location.reload();
+    });
+    return;
+  }
+
   const {data,error} = await sb.auth.getSession();
   if(error) return mostrarErroLogin('Não foi possível recuperar a sessão.');
   if(data.session) await abrirConta(data.session.user);
+}
+
+/* Monta a casca mínima para uma tela pública: sem menu lateral, sem perfil,
+   sem nada que dependa de usuário autenticado. */
+async function abrirPublica(k){
+  $('#auth').classList.add('hidden');
+  $('#app').classList.remove('hidden');
+  $('#sidebar').classList.add('hidden');
+  $('#app').style.gridTemplateColumns = '1fr';
+  $('#page-actions').innerHTML = '';
+  $('#aviso-global').innerHTML = '';
+  $('#trilha').textContent = ORGAO;
+  const titulos = { acompanhar:'Acompanhar solicitação', espera:'Tempos de espera' };
+  $('#page-title').textContent = titulos[k];
+  document.title = `${titulos[k]} — Regula Posse`;
+  const el = $('#pagina');
+  el.innerHTML = carregando();
+  try {
+    await ROTAS_PUBLICAS[k](el);
+  } catch(e){
+    el.innerHTML = estado({ tipo:'erro', titulo:'Não foi possível carregar esta tela', texto:h(e.message) });
+  }
 }
 
 function mostrarErroLogin(texto){ $('#login-msg').textContent = texto; }
@@ -445,7 +502,11 @@ function telaLogin(){
   $('#auth-area').innerHTML = `<h1>Entrar no Regula Posse</h1><form id="login-form">
     <label class="field">E-mail<input name="email" type="email" autocomplete="username" required></label>
     <label class="field">Senha<input name="senha" type="password" autocomplete="current-password" required></label>
-    <p id="login-msg" role="alert"></p><button class="btn pri" type="submit">Entrar</button></form>`;
+    <p id="login-msg" role="alert"></p><button class="btn pri" type="submit">Entrar</button></form>
+    <p class="muted" style="margin:18px 0 0;font-size:13px;border-top:1px solid var(--borda);padding-top:14px">
+      <b>Você é paciente?</b> Não precisa de conta.
+      <a href="#/acompanhar">Acompanhe sua solicitação</a> com o protocolo da sua guia,
+      ou veja os <a href="#/espera">tempos de espera por procedimento</a>.</p>`;
   $('#login-form').onsubmit = async e => {
     e.preventDefault();
     if(!sb) return;
@@ -531,6 +592,115 @@ async function carregarProcedimentos(){
 }
 
 /* =====================================================================
+   TELAS PÚBLICAS (sem login)
+   ===================================================================== */
+
+/** URL de acompanhamento, usada no QR Code da guia e no rodapé dela. */
+const urlAcompanhar = protocolo =>
+  new URL(`#/acompanhar?p=${encodeURIComponent(protocolo)}`, location.href.split('#')[0]).href;
+
+async function pgAcompanhar(el){
+  const prot = params().get('p') || '';
+  el.innerHTML = `
+    <div class="card" style="max-width:560px;margin:0 auto">
+      <div class="card-h"><h2>Acompanhar sua solicitação</h2></div>
+      <p class="muted">Informe o número do protocolo, que está na sua guia, e a data de
+        nascimento do paciente. Pedimos os dois dados para proteger a informação de saúde.</p>
+      <form id="ac-f" novalidate>
+        <div class="grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+          <div class="field">
+            <label for="ac-p">Número do protocolo</label>
+            <span class="dica" id="ac-p-d">Como está na guia, por exemplo 2026000123.</span>
+            <input id="ac-p" inputmode="numeric" autocomplete="off" aria-describedby="ac-p-d" value="${h(prot)}">
+          </div>
+          <div class="field">
+            <label for="ac-n">Data de nascimento</label>
+            <span class="dica" id="ac-n-d">dd/mm/aaaa</span>
+            <input id="ac-n" data-mask="data" inputmode="numeric" autocomplete="off" aria-describedby="ac-n-d" placeholder="dd/mm/aaaa">
+          </div>
+        </div>
+        <p id="ac-erro" class="erro-msg hidden" role="alert"></p>
+        <div class="acoes" style="margin-top:14px">
+          <button class="btn pri lg" type="submit">Consultar</button>
+          <a class="btn" href="#/espera">Ver tempos de espera</a>
+        </div>
+      </form>
+      <div id="ac-res" aria-live="polite"></div>
+    </div>`;
+
+  const erro = msg => { const e = $('#ac-erro'); e.textContent = msg; e.classList.toggle('hidden', !msg); };
+
+  async function consultar(){
+    erro('');
+    $('#ac-res').innerHTML = '';
+    const p = dig($('#ac-p').value);
+    const nasc = brParaISO($('#ac-n').value);
+    if(!p) return erro('Informe o número do protocolo que está na sua guia.');
+    if(!nasc) return erro('Informe a data de nascimento no formato dd/mm/aaaa.');
+
+    const btn = $('#ac-f button[type=submit]');
+    const r = await ocupado(btn, () => q(sb.rpc('consultar_protocolo', { p_protocolo: p, p_nascimento: nasc })));
+    const d = Array.isArray(r) ? r[0] : r;
+
+    if(!d || d.resultado === 'incompleto') return erro('Informe o protocolo e a data de nascimento.');
+    if(d.resultado === 'limite') return erro('Tivemos muitas consultas em pouco tempo. Aguarde alguns minutos e tente de novo.');
+    if(d.resultado === 'nao_encontrado') return erro('Não encontramos esse protocolo com essa data de nascimento. Confira os dois dados na sua guia.');
+
+    const linha = (rot, val) => val ? `<div><dt>${h(rot)}</dt><dd>${val}</dd></div>` : '';
+    $('#ac-res').innerHTML = `
+      <h3 style="margin-top:22px">Protocolo ${h(d.protocolo)}</h3>
+      <dl class="dl">
+        ${linha('Situação', `<b>${h(d.situacao)}</b>`)}
+        ${linha('Procedimento', h(d.procedimento))}
+        ${linha('Data do pedido médico', fmtData(d.data_pedido))}
+        ${linha('Tempo desde o pedido', d.dias_desde_pedido != null ? `${num(d.dias_desde_pedido)} dia(s)` : '')}
+        ${linha('Posição na fila deste procedimento', d.posicao != null ? `${num(d.posicao)}º` : '')}
+        ${d.agendada_data ? linha('Atendimento marcado', `<b>${h(dataExtenso(d.agendada_data))} às ${h(fmtHora(d.agendada_hora))}</b>`) : ''}
+        ${linha('Local', h(d.local_nome))}
+        ${linha('Endereço', h(d.local_endereco))}
+        ${linha('Telefone do local', d.local_telefone ? h(fTel(d.local_telefone)) : '')}
+        ${linha('Motivo informado pela regulação', h(d.parecer))}
+      </dl>
+      ${d.posicao != null ? alerta('info', 'A posição na fila muda conforme chegam casos de maior risco clínico, '
+          + 'conforme o protocolo da regulação municipal. Ela é uma estimativa, não uma garantia de data.') : ''}
+      ${d.agendada_data ? alerta('warn', 'Se não puder comparecer, avise a Secretaria de Saúde com antecedência '
+          + 'para que a vaga seja remanejada para outro paciente.') : ''}`;
+  }
+
+  $('#ac-f').onsubmit = e => { e.preventDefault(); consultar().catch(err => erro(err.message)); };
+  if(prot) $('#ac-n').focus();
+}
+
+async function pgEspera(el){
+  const linhas = await q(sb.rpc('tempos_medios_espera'));
+  if(!linhas.length){
+    el.innerHTML = estado({ titulo:'Nenhuma solicitação aguardando no momento',
+      texto:'Quando houver fila, os tempos de espera aparecem aqui.' });
+    return;
+  }
+  const total = linhas.reduce((a, l) => a + Number(l.aguardando), 0);
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-h"><h2>Tempos de espera por procedimento</h2>
+        <span class="sub">${num(total)} solicitação(ões) aguardando · atualizado agora</span></div>
+      <p class="muted">Contagem a partir da data do pedido médico. Não há nenhum dado pessoal
+        nesta página. Para saber da sua solicitação, use o <a href="#/acompanhar">acompanhamento por protocolo</a>.</p>
+      <div id="esp-tab"></div>
+    </div>`;
+  montarTabela($('#esp-tab'), {
+    rotuloItens: 'procedimento(s)',
+    ordem: { i:1, asc:false },
+    linhas,
+    colunas: [
+      { l:'Procedimento', f:l => h(l.procedimento) + (l.exige_regulacao ? ' ' + tagReg() : ''), v:l => l.procedimento },
+      { l:'Aguardando',   n:true, f:l => num(l.aguardando),                      v:l => Number(l.aguardando) },
+      { l:'Espera média', n:true, f:l => `${num(l.espera_media_dias)} dia(s)`,   v:l => Number(l.espera_media_dias) },
+      { l:'Maior espera', n:true, f:l => `${num(l.espera_maxima_dias)} dia(s)`,  v:l => Number(l.espera_maxima_dias) },
+    ],
+  });
+}
+
+/* =====================================================================
    ROTAS, MENU E PERMISSÕES
    As permissões repetem as regras do banco (schema.sql). Esconder o menu
    não basta: navegar() também bloqueia o acesso direto pelo endereço.
@@ -548,6 +718,7 @@ const ROTAS = {
   locais:       { t:'Locais e unidades',          ic:'locais',        g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgLocais },
   procedimentos:{ t:'Procedimentos',              ic:'procedimentos', g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgProcedimentos },
   pacientes:    { t:'Pacientes',                  ic:'pacientes',     g:'Administração',  papeis:['admin','solicitante','agendador','regulador'], r:() => pgPacientes },
+  vulnerabilidade:{ t:'Critérios de vulnerabilidade', ic:'regulacao', g:'Regulação',   papeis:['admin'],                                       r:() => pgVulnerabilidade },
   usuarios:     { t:'Usuários',                   ic:'usuarios',      g:'Administração',  papeis:['admin'],                                       r:() => pgUsuarios },
   relatorios:   { t:'Relatórios',                 ic:'relatorios',    g:'Relatórios',     papeis:TODOS,                                         r:() => pgRelatorios },
 };
@@ -1253,6 +1424,7 @@ function casaStatus(s, f){
     case 'abertas': return ABERTAS.includes(s.status);
     case 'regulacao': return s.status === 'pendente' && s.exige_regulacao;
     case 'agendar': return s.status === 'autorizada' || (s.status === 'pendente' && !s.exige_regulacao);
+    case 'reagendar': return s.status === 'faltou';
     case 'pendente': return s.status === 'pendente';
     default: return s.status === f;
   }
@@ -1363,6 +1535,11 @@ async function abrirSolicitacao(id, depois){
     acoes.push({ label:'Analisar ›', cls:'pri', onClick: () => { ir(`#/regulacao?sol=${id}`); } });
   if(casaStatus(s, 'agendar') && pode('agendamento'))
     acoes.push({ label:'Agendar ›', cls:'pri', onClick: () => { ir(`#/agendamento?sol=${id}&pac=${s.paciente_id}`); } });
+  if(s.status === 'autorizada' && !s.vaga_id && can('admin','regulador'))
+    acoes.push({ label:'Rever autorização', cls:'warn', onClick: async () => {
+      const ok = await reverAutorizacao(s); if(ok) fim(`Autorização de <b>${h(s.protocolo)}</b> revista.`); return ok; } });
+  if(s.status === 'faltou' && pode('agendamento'))
+    acoes.push({ label:'Reagendar ›', cls:'pri', onClick: () => { ir(`#/agendamento?sol=${id}&pac=${s.paciente_id}`); } });
   if(s.status === 'agendada'){
     acoes.push({ label:'Imprimir guia', onClick: () => { imprimirGuia(s); return false; } });
     if(pode('agendamento')) acoes.push({ label:'Remarcar', onClick: () => { ir(`#/agendamento?sol=${id}&pac=${s.paciente_id}`); } });
@@ -1375,6 +1552,7 @@ async function abrirSolicitacao(id, depois){
     body: `
       <div class="row" style="margin-bottom:10px">${badgeSt(s)} ${badgePrio(s.prioridade, true)} ${s.exige_regulacao ? tagReg() : ''}
         ${s.numero_guia ? `<span class="badge st-agendada">Guia ${h(s.numero_guia)}</span>` : ''}<span class="muted">registrada há ${s.dias_espera} dia(s), em ${fmtDataHora(s.created_at)}</span></div>
+      ${esperaDupla(s)}
       ${s.status === 'devolvida' ? alerta('warn', `<b>Motivo:</b> ${h(s.parecer || 'não informado')}<br>Corrija as informações e reenvie para nova análise.`, 'Devolvida pelo regulador') : ''}
       ${s.status === 'negada' ? alerta('err', `<b>Motivo:</b> ${h(s.parecer || 'não informado')}`, 'Solicitação negada') : ''}
       ${pend.length && ['pendente','autorizada','devolvida'].includes(s.status) ? alerta('warn', `Faltam: ${h(pend.join(', '))}.`, 'Registro incompleto') : ''}
@@ -1412,6 +1590,23 @@ async function abrirSolicitacao(id, depois){
 }
 
 /* Cancelar: explica o efeito e exige motivo */
+/* Antes da migração 002, autorização equivocada não tinha volta: a única
+   saída era cancelar, o que encerra a solicitação e tira o paciente da
+   fila. Agora o regulador devolve à unidade ou nega, com parecer
+   obrigatório, enquanto não houver vaga marcada. */
+async function reverAutorizacao(s){
+  const r = await confirmar({
+    titulo:'Rever autorização', botao:'Devolver à unidade', cls:'warn',
+    html:`<p><b>${h(s.paciente_nome)}</b> — ${h(s.procedimento_nome)} (protocolo ${h(s.protocolo)})</p>`
+      + alerta('info', 'A solicitação volta para a unidade de origem, que pode corrigir e reenviar. '
+        + 'O tempo de fila já acumulado é mantido e tudo fica no histórico, com o seu nome.', 'O que acontece'),
+    campo:{ label:'Motivo da revisão', obrigatorio:true, min:5,
+      dica:'Obrigatório. A unidade de origem vê este texto.' } });
+  if(!r.ok) return false;
+  await q(sb.rpc('regular_solicitacao', { p_id:s.id, p_acao:'devolver', p_prioridade:null, p_parecer:r.texto }));
+  return true;
+}
+
 async function cancelarSolicitacao(s){
   const r = await confirmar({ titulo:'Cancelar solicitação', botao:'Cancelar solicitação', cls:'err',
     html: `<p><b>${h(s.paciente_nome)}</b> — ${h(s.procedimento_nome)} (protocolo ${h(s.protocolo)})</p>
@@ -1716,14 +1911,21 @@ async function pgAgendamento(el){
 
   async function confirmarAgendamento(s, v, rem){
     const u = S.unidades.find(x => x.id === v.unidade_executante_id) || {};
-    const r = await confirmar({ titulo: rem ? 'Confirmar remarcação' : 'Confirmar agendamento', botao: rem ? 'Remarcar' : 'Confirmar agendamento', cls:'pri',
+    const aposFalta = s.status === 'faltou';
+    const r = await confirmar({
+      titulo: aposFalta ? 'Reagendar após falta' : (rem ? 'Confirmar remarcação' : 'Confirmar agendamento'),
+      botao: aposFalta ? 'Reagendar' : (rem ? 'Remarcar' : 'Confirmar agendamento'), cls:'pri',
+      // O banco exige o motivo do reagendamento depois de uma falta: fica no histórico.
+      campo: aposFalta ? { label:'Motivo do reagendamento', obrigatorio:true,
+        dica:'Fica registrado no histórico da solicitação. Ex.: paciente justificou a ausência e pediu nova data.' } : null,
       html:`<dl class="dl"><div><dt>Paciente</dt><dd>${h(s.paciente_nome)}</dd></div><div><dt>Procedimento</dt><dd>${h(s.procedimento_nome)}</dd></div>
         <div><dt>Data e hora</dt><dd><b>${dataExtenso(v.data)} às ${fmtHora(v.hora)}</b></dd></div><div><dt>Local</dt><dd>${h(u.nome)}${u.endereco ? `<small class="muted" style="display:block">${h(u.endereco)}</small>` : ''}</dd></div>
         <div><dt>Profissional</dt><dd>${h(v.profissional || '—')}</dd></div></dl>
-        ${rem ? alerta('warn', `A vaga atual (${fmtData(s.vaga_data)} às ${fmtHora(s.vaga_hora)}) será liberada para outro paciente. A guia nº <b>${h(s.numero_guia)}</b> continua a mesma.`, 'O que acontece') : ''}` });
+        ${rem ? alerta('warn', `A vaga atual (${fmtData(s.vaga_data)} às ${fmtHora(s.vaga_hora)}) será liberada para outro paciente. A guia nº <b>${h(s.numero_guia)}</b> continua a mesma.`, 'O que acontece') : ''}
+        ${aposFalta ? alerta('info', `A vaga da falta anterior não volta para a oferta — ela foi consumida e continua nos indicadores. A solicitação original é mantida, com o tempo de fila já acumulado, e a guia nº <b>${h(s.numero_guia)}</b> segue a mesma.`, 'O que acontece') : ''}` });
     if(!r.ok) return;
     try {
-      const guia = await q(sb.rpc('agendar', { p_solicitacao:s.id, p_vaga:v.id }));
+      const guia = await q(sb.rpc('agendar', { p_solicitacao:s.id, p_vaga:v.id, p_obs: r.texto || null }));
       const at = await q(sb.from('vw_solicitacoes').select('*').eq('id', s.id).single());
       atualizarContadores();
       aviso(`<b>${h(at.paciente_nome)}</b> — ${h(at.procedimento_nome)}: ${dataExtenso(at.vaga_data)} às ${fmtHora(at.vaga_hora)}, ${h(at.unidade_executante_nome)}. Guia nº <b>${h(guia)}</b>.
@@ -1761,6 +1963,17 @@ function imprimirGuia(s){
   const w = window.open('', '_blank');
   if(!w){ toast('O navegador bloqueou a janela de impressão. Permita pop-ups para este arquivo e tente de novo.', 'err'); return; }
   const logo = new URL('assets/regula-posse-logo.svg', location.href).href;
+  /* QR com o endereço de acompanhamento. Leva só o protocolo: a data de
+     nascimento continua sendo pedida na tela, então guia perdida ou
+     fotografada não abre a situação de ninguém. O SVG é gerado aqui, sem
+     serviço externo — o protocolo do paciente não sai desta máquina. */
+  const acompanhar = urlAcompanhar(s.protocolo);
+  let qr = '';
+  try {
+    qr = qrSVG(acompanhar, { lado: 96, nivel: 'M', titulo: `Acompanhar o protocolo ${s.protocolo}` });
+  } catch(e){
+    registrarErro(e, 'qr da guia');     // guia sem QR ainda serve; sem guia, não
+  }
   const via = nome => `<div class="via">
     <div class="cab"><div><img src="${logo}" alt="Regula Posse" style="height:40px"><div style="margin-top:4px"><b>${h(ORGAO)}</b> — Central de Regulação</div><div><b>Guia de Agendamento</b></div></div>
       <div class="g">GUIA Nº<br><b>${h(s.numero_guia)}</b></div></div>
@@ -1775,6 +1988,12 @@ function imprimirGuia(s){
     </table>
     <div class="obs"><b>Orientações:</b> chegar com 30 minutos de antecedência, com documento com foto, Cartão SUS, esta guia,
       o pedido médico e exames anteriores. Se não puder comparecer, avise a Secretaria de Saúde com antecedência para que a vaga seja remanejada.</div>
+    ${qr ? `<div class="acomp">
+      <div class="qr">${qr}</div>
+      <div><b>Acompanhe pelo celular</b>
+        <div>Aponte a câmera para o código ao lado, ou acesse <span class="url">${h(acompanhar)}</span></div>
+        <div>Será pedido o protocolo <b>${h(s.protocolo)}</b> e a data de nascimento do paciente.</div></div>
+    </div>` : ''}
     <div class="ass"><div>Responsável pelo agendamento</div><div>Paciente / responsável</div></div>
     <div class="rod"><span>${nome}</span><span>Emitido em ${new Date().toLocaleString('pt-BR')}</span></div></div>`;
   w.document.write(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><title>Guia ${h(s.numero_guia)}</title>
@@ -1786,6 +2005,10 @@ function imprimirGuia(s){
   .obs{font-size:11px;color:#222;border:1px dashed #777;padding:6px;margin-top:8px}.ass{margin-top:30px;display:flex;gap:40px}
   .ass div{flex:1;border-top:1px solid #000;text-align:center;padding-top:3px;font-size:11px}
   .rod{display:flex;justify-content:space-between;font-size:10px;color:#555;margin-top:8px}
+  .acomp{display:flex;gap:10px;align-items:center;margin-top:8px;border:1px solid #c5d9ea;background:#f7fbfe;padding:6px;border-radius:6px;font-size:10.5px}
+  .acomp .qr{flex:none;line-height:0}
+  .acomp .qr svg{width:72px;height:72px;display:block}
+  .acomp .url{font-family:monospace;word-break:break-all}
   .corte{border-top:1px dashed #000;margin:18px 0;text-align:center;font-size:10px;color:#555}
   @media print{button{display:none}body{margin:0 auto}@page{size:A4 portrait;margin:10mm}}</style></head><body>
   ${via('Via do paciente')}<div class="corte">✂ recorte aqui</div>${via('Via do local de atendimento')}
@@ -2452,6 +2675,28 @@ function pgLocais(el){
 }
 
 /* ---------- Procedimentos ---------- */
+function pgVulnerabilidade(el){
+  el.innerHTML = alerta('info',
+    'A Política Nacional de Regulação manda a prioridade considerar risco, tempo de espera e '
+    + '<b>vulnerabilidade</b>, e atribui ao município definir os critérios a partir da sua realidade '
+    + 'epidemiológica, social e geográfica. Por isso esta lista nasce vazia: nenhum critério vem de fábrica. '
+    + 'Enquanto não houver critério cadastrado, nada muda na ordenação da fila. O peso soma na análise '
+    + 'regulatória; ele não passa por cima da classificação de risco.',
+    'Quem define é a regulação municipal') + '<div id="crud"></div>';
+  return crud({ el: $('#crud', el), tabela:'criterios_vulnerabilidade', titulo:'critério', artigo:'o',
+    efeitoDesativar:'Deixa de somar peso nas novas análises; o que já foi registrado nas solicitações é mantido.',
+    campos:[
+      { name:'nome', label:'Critério', required:true, span:2, dica:'Ex.: pessoa em situação de rua; residente em área rural de difícil acesso' },
+      { name:'peso', label:'Peso', type:'number', num:true, required:true, dica:'De 1 a 10. Quanto maior, mais a solicitação sobe entre as de mesmo risco.' },
+      { name:'ativo', label:'Situação', type:'checkbox', text:'Ativo' },
+      { name:'descricao', label:'Como identificar', span:4, rows:2,
+        dica:'Opcional. Orienta quem registra, para o critério ser aplicado igual por todas as unidades.' } ],
+    validar:(o, err) => { if(o.peso != null && (o.peso < 1 || o.peso > 10)) err('peso', 'O peso vai de 1 a 10.'); },
+    colunas:[
+      { l:'Critério', f:d => `<b>${h(d.nome)}</b>${d.descricao ? `<small>${h(d.descricao)}</small>` : ''}`, v:d => d.nome },
+      { l:'Peso', n:true, f:d => num(d.peso), v:d => d.peso } ] });
+}
+
 function pgProcedimentos(el){
   el.innerHTML = alerta('info', 'A tabela SIGTAP importada está em <b>Situação → Somente inativos</b>. Busque pelo código ou nome, edite o tipo e a regulação, e ative apenas os procedimentos oferecidos pelo município.') + '<div id="crud"></div>';
   return crud({ el: $('#crud', el), tabela:'procedimentos', titulo:'procedimento', artigo:'o',
