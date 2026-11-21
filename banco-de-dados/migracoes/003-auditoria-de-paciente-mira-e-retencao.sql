@@ -266,7 +266,7 @@ $$;
    por data de atualização, para um reenvio pegar o que mudou. */
 create or replace function mira_lote(p_de date default null, p_ate date default null)
 returns setof vw_mira
-language plpgsql stable security definer set search_path = public as $
+language plpgsql stable security definer set search_path = public as $$
 begin
   if not tem_papel('admin','regulador') then
     raise exception 'Acesso à exportação MIRA restrito à regulação.' using errcode = '42501';
