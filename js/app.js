@@ -1970,7 +1970,12 @@ function imprimirGuia(s){
   const acompanhar = urlAcompanhar(s.protocolo);
   let qr = '';
   try {
-    qr = qrSVG(acompanhar, { lado: 96, nivel: 'M', titulo: `Acompanhar o protocolo ${s.protocolo}` });
+    /* 120px ≈ 32 mm no papel. Uma URL de acompanhamento dá um QR versão 4,
+       de 33 módulos, então isto deixa cada módulo com ~0,95 mm. Testado a
+       72px, o módulo ficava com ~0,58 mm e o leitor já não decodificava a
+       guia fotografada — tamanho de QR não é detalhe estético, é se o
+       paciente consegue ou não apontar a câmera. */
+    qr = qrSVG(acompanhar, { lado: 120, nivel: 'M', titulo: `Acompanhar o protocolo ${s.protocolo}` });
   } catch(e){
     registrarErro(e, 'qr da guia');     // guia sem QR ainda serve; sem guia, não
   }
@@ -2005,9 +2010,9 @@ function imprimirGuia(s){
   .obs{font-size:11px;color:#222;border:1px dashed #777;padding:6px;margin-top:8px}.ass{margin-top:30px;display:flex;gap:40px}
   .ass div{flex:1;border-top:1px solid #000;text-align:center;padding-top:3px;font-size:11px}
   .rod{display:flex;justify-content:space-between;font-size:10px;color:#555;margin-top:8px}
-  .acomp{display:flex;gap:10px;align-items:center;margin-top:8px;border:1px solid #c5d9ea;background:#f7fbfe;padding:6px;border-radius:6px;font-size:10.5px}
+  .acomp{display:flex;gap:12px;align-items:center;margin-top:8px;border:1px solid #c5d9ea;background:#f7fbfe;padding:8px;border-radius:6px;font-size:10.5px}
   .acomp .qr{flex:none;line-height:0}
-  .acomp .qr svg{width:72px;height:72px;display:block}
+  .acomp .qr svg{width:120px;height:120px;display:block}
   .acomp .url{font-family:monospace;word-break:break-all}
   .corte{border-top:1px dashed #000;margin:18px 0;text-align:center;font-size:10px;color:#555}
   @media print{button{display:none}body{margin:0 auto}@page{size:A4 portrait;margin:10mm}}</style></head><body>
