@@ -42,7 +42,10 @@ ferramentas/                  verificadores do CI e scripts de manutenção
 banco-de-dados/schema.sql     estado atual do banco, para instalação nova
 banco-de-dados/migracoes/     o delta de cada versão, para banco em produção
 banco-de-dados/testes/        testes do fluxo de regulação, em SQL
+OPERACAO.md                   backup, restauração, endurecimento do acesso
 ```
+
+Quem mantém o sistema no ar deve ler o **[OPERACAO.md](OPERACAO.md)** antes de a primeira unidade começar a usar — em especial o ensaio de restauração.
 
 Antes de abrir um pull request:
 
@@ -104,10 +107,36 @@ A fila **não** foi reordenada para usar a data do pedido. Seria mais justo, mas
 
 A PNR-SUS manda a prioridade considerar risco, tempo de espera e vulnerabilidade, e atribui ao município definir os critérios. Então `criterios_vulnerabilidade` nasce **vazia**, como `CRITERIOS_RISCO` já nascia: sem critério cadastrado, o peso é zero e nada muda na fila. Quem cadastra é o administrador, em **Regulação → Critérios de vulnerabilidade**.
 
+## Auditoria e privacidade
+
+Três registros diferentes, que respondem perguntas diferentes:
+
+| Onde | O que responde |
+|---|---|
+| `historico` | o que aconteceu com a solicitação, incluindo quem reclassificou o risco e de qual valor para qual |
+| `historico_paciente` | quem alterou o cadastro de um paciente, qual campo, de que valor para qual |
+| `acessos_paciente` | quem abriu o cadastro de um paciente, quando e em que tela |
+
+Os três ficam em **Administração → Auditoria**, visíveis só para administrador.
+
+Um limite do log de acesso que precisa ficar claro: o cliente lê a tabela `pacientes` direto pelo PostgREST, então ele **não** intercepta toda consulta ao banco. Registra abertura deliberada de cadastro pela aplicação — ficha, detalhe de solicitação e impressão de guia. Interceptar toda leitura exigiria tirar o acesso direto à tabela e passar tudo por função; está na lista de pendências.
+
+## Envio ao Ministério (MIRA)
+
+**Administração → Envio ao Ministério** monta os 16 elementos do Modelo de Informação da Regulação Assistencial e aponta o que impede o envio de cada registro — solicitação sem CID-10, procedimento sem código SIGTAP, unidade sem CNES, paciente sem CPF e sem CNS.
+
+**A tela não transmite.** A transmissão usa o [Guia de Implementação FHIR da RNDS](https://fhir.saude.gov.br/rira/) e exige credenciamento do município. O que está pronto é a camada de dados; a serialização FHIR e o envio precisam ser validados contra o guia oficial antes de qualquer uso real.
+
+Dois mapeamentos ficaram isolados em funções próprias, porque envolvem interpretação e a regulação municipal pode querer mudá-los: `mira_caracter()` reduz os quatro níveis de risco aos dois caracteres do modelo (eletivo e urgência), e `mira_status()` reduz os oito status às sete situações previstas.
+
+Antes de usar, marque em **Locais e unidades** qual unidade opera a central: o CNES dela vai no elemento "estabelecimento regulador".
+
 ### Pendente
 
 - Dividir `js/app.js` por tela (`js/telas/*.js`), hoje ainda num arquivo só.
 - Mover a busca de pacientes e de procedimentos para consulta paginada no servidor: hoje os 5.068 procedimentos vão para a memória do navegador a cada login.
 - Registrar acesso de leitura a cadastro de paciente, não só as mudanças de situação das solicitações.
 - Escolher uma licença — sem arquivo `LICENSE`, outro município não pode reaproveitar o código com segurança jurídica.
-- **Envio de dados à RNDS no formato MIRA.** A Portaria GM/MS nº 6.656/2025 tornou obrigatório o envio dos dados de Regulação Assistencial ao Ministério da Saúde, e usar sistema próprio não dispensa isso — a portaria prevê expressamente sistemas próprios como mecanismo de envio. O schema já guarda quase todos os campos do modelo e as unidades já têm CNES, mas não há exportador. É o maior item em aberto; confirme o prazo aplicável com a coordenação de regulação.
+- **Transmissão do MIRA para a RNDS.** A camada de dados está pronta; falta a serialização FHIR e o envio, que dependem do credenciamento do município.
+- **Log de acesso abrangente.** Hoje registra abertura de cadastro pela aplicação. Cobrir toda leitura exige tirar o acesso direto do cliente à tabela `pacientes` e passar tudo por função.
+- **Ambiente de homologação separado.** Hoje o preview do Netlify e o site publicado usam o mesmo banco, então testar no preview grava em produção.

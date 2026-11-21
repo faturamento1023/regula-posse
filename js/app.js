@@ -122,6 +122,19 @@ function registrarErro(e, onde){
     }).then(() => {}, () => {});
   } catch { /* nunca propaga */ }
 }
+/* Registro de acesso a cadastro de paciente, para a auditoria da LGPD.
+   Dispara e segue: se falhar, não pode atrapalhar quem está atendendo.
+   A deduplicação por janela é feita no banco, então chamar de novo na
+   mesma tela não polui o log. Cobre abertura deliberada de cadastro, não
+   toda consulta — ver a nota na migração 003. */
+function registrarAcesso(pacienteId, contexto){
+  if(!sb || !S.user || !pacienteId) return;
+  try {
+    sb.rpc('registrar_acesso_paciente', { p_paciente_id: pacienteId, p_contexto: contexto })
+      .then(() => {}, e => registrarErro(e, 'registrarAcesso'));
+  } catch(e){ registrarErro(e, 'registrarAcesso'); }
+}
+
 window.addEventListener('error', e => registrarErro(e.error ?? e.message, 'window.onerror'));
 window.addEventListener('unhandledrejection', e => registrarErro(e.reason, 'promessa não tratada'));
 
@@ -719,6 +732,8 @@ const ROTAS = {
   procedimentos:{ t:'Procedimentos',              ic:'procedimentos', g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgProcedimentos },
   pacientes:    { t:'Pacientes',                  ic:'pacientes',     g:'Administração',  papeis:['admin','solicitante','agendador','regulador'], r:() => pgPacientes },
   vulnerabilidade:{ t:'Critérios de vulnerabilidade', ic:'regulacao', g:'Regulação',   papeis:['admin'],                                       r:() => pgVulnerabilidade },
+  mira:         { t:'Envio ao Ministério (MIRA)', ic:'relatorios',    g:'Administração',  papeis:['admin','regulador'],                           r:() => pgMira },
+  auditoria:    { t:'Auditoria',                  ic:'usuarios',      g:'Administração',  papeis:['admin'],                                       r:() => pgAuditoria },
   usuarios:     { t:'Usuários',                   ic:'usuarios',      g:'Administração',  papeis:['admin'],                                       r:() => pgUsuarios },
   relatorios:   { t:'Relatórios',                 ic:'relatorios',    g:'Relatórios',     papeis:TODOS,                                         r:() => pgRelatorios },
 };
@@ -1102,6 +1117,7 @@ function faltasPaciente(p){
 
 /* Ficha do paciente: dados agrupados + histórico */
 async function fichaPaciente(pacId, aba='dados'){
+  registrarAcesso(pacId, 'ficha do paciente');
   const p = await q(sb.from('pacientes').select('*').eq('id', pacId).single());
   const lst = await q(sb.from('vw_solicitacoes').select('*').eq('paciente_id', pacId).order('created_at', { ascending:false }));
   registrarRecente(p);
@@ -1516,10 +1532,12 @@ async function pgSolicitacoes(el){
    DETALHE DA SOLICITAÇÃO (usado em várias telas)
    ===================================================================== */
 async function abrirSolicitacao(id, depois){
+  // registrado assim que se sabe o paciente, logo após carregar (abaixo)
   const [s, hist] = await Promise.all([
     q(sb.from('vw_solicitacoes').select('*').eq('id', id).single()),
     q(sb.from('historico').select('*, perfis(nome)').eq('solicitacao_id', id).order('created_at'))
   ]);
+  registrarAcesso(s.paciente_id, 'detalhe da solicitação');
   const minhaUnidade = s.unidade_solicitante_id === S.perfil.unidade_id;
   const central = can('admin','regulador','agendador');
   const pend = pendencias(s);
@@ -1960,6 +1978,7 @@ async function pgAgendamento(el){
 
 /* ---------- Guia de agendamento (2 vias) ---------- */
 function imprimirGuia(s){
+  registrarAcesso(s.paciente_id, 'impressão de guia');
   const w = window.open('', '_blank');
   if(!w){ toast('O navegador bloqueou a janela de impressão. Permita pop-ups para este arquivo e tente de novo.', 'err'); return; }
   const logo = new URL('assets/regula-posse-logo.svg', location.href).href;
@@ -2680,6 +2699,162 @@ function pgLocais(el){
 }
 
 /* ---------- Procedimentos ---------- */
+/* =====================================================================
+   ENVIO AO MINISTÉRIO (MIRA) E AUDITORIA
+   ===================================================================== */
+
+async function pgMira(el){
+  const [pend, lote] = await Promise.all([
+    q(sb.rpc('mira_pendencias')),
+    q(sb.rpc('mira_lote', { p_de:null, p_ate:null })),
+  ]);
+  const total = await q(sb.from('solicitacoes').select('id', { count:'exact', head:true }))
+    .then(() => null).catch(() => null);
+
+  el.innerHTML = `
+    ${alerta('info',
+      'A Portaria GM/MS nº 6.656/2025 tornou obrigatório o envio dos dados de Regulação Assistencial ao '
+      + 'Ministério da Saúde, no formato MIRA, e usar sistema próprio não dispensa. '
+      + '<b>Esta tela monta os dados e aponta o que falta; ela não transmite.</b> '
+      + 'A transmissão usa o Guia de Implementação FHIR da RNDS e exige credenciamento do município — '
+      + 'confirme com a coordenação de regulação antes de usar esta exportação para valer.',
+      'O que esta tela faz e o que não faz')}
+
+    <section class="card">
+      <div class="card-h"><h2>O que ainda impede o envio</h2>
+        <span class="sub">${pend.length ? 'corrija antes de exportar' : 'nada pendente'}</span></div>
+      <div id="mira-pend"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-h"><h2>Lote pronto para envio</h2>
+        <span class="sub"><b>${num(lote.length)}</b> solicitação(ões) com o cadastro completo</span>
+        <span class="spacer"></span>
+        <div class="acoes">
+          <button class="btn" id="mira-csv" ${lote.length ? '' : 'disabled'}>Baixar CSV</button>
+          <button class="btn pri" id="mira-json" ${lote.length ? '' : 'disabled'}>Baixar JSON</button>
+        </div></div>
+      <p class="muted">Os 16 elementos do Modelo de Informação da Regulação Assistencial, conforme o anexo
+        da Portaria Conjunta SAES/SEIDIGI nº 3/2023.</p>
+      <div id="mira-tab"></div>
+    </section>`;
+
+  if(pend.length){
+    montarTabela($('#mira-pend', el), {
+      linhas: pend, rotuloItens:'pendência(s)', pagina:20,
+      colunas: [
+        { l:'Problema', f:p => `<b>${h(p.problema)}</b>`, v:p => p.problema },
+        { l:'Solicitações', n:true, f:p => num(p.solicitacoes), v:p => Number(p.solicitacoes) },
+        { l:'Como resolver', f:p => h(p.como_resolver), v:p => p.como_resolver },
+      ],
+    });
+  } else {
+    $('#mira-pend', el).innerHTML = alerta('ok', 'Todas as solicitações têm CID-10, código SIGTAP, CNES e identificação do paciente.');
+  }
+
+  const CAB = ['Identificador','Status','Procedimento (SIGTAP)','Data da solicitação','Data de autorização',
+    'Data da execução','Identificador do paciente','Tipo','CNES solicitante','CNES regulador','CNES executante',
+    'CBO executante','Modalidade','Caráter','Motivo (CID-10)'];
+  const linha = r => [r.identificador_registro, r.status_solicitacao, r.codigo_procedimento,
+    fmtDataHora(r.data_solicitacao), fmtDataHora(r.data_autorizacao), fmtDataHora(r.data_execucao),
+    r.identificador_paciente, r.tipo_identificador_paciente, r.cnes_solicitante, r.cnes_regulador,
+    r.cnes_executante, r.cbo_executante, r.modalidade_assistencial, r.caracter_solicitacao, r.motivo_solicitacao];
+
+  if(lote.length){
+    montarTabela($('#mira-tab', el), {
+      linhas: lote, rotuloItens:'registro(s)', pagina:25,
+      colunas: [
+        { l:'Identificador', f:r => `<b>${h(r.identificador_registro)}</b>`, v:r => r.identificador_registro },
+        { l:'Status', f:r => h(r.status_solicitacao), v:r => r.status_solicitacao },
+        { l:'SIGTAP', f:r => h(r.codigo_procedimento), v:r => r.codigo_procedimento },
+        { l:'Paciente', f:r => `${h(r.identificador_paciente)}<small>${h(r.tipo_identificador_paciente?.toUpperCase() || '')}</small>`, v:r => r.identificador_paciente },
+        { l:'CID-10', f:r => h(r.motivo_solicitacao), v:r => r.motivo_solicitacao },
+        { l:'Caráter', f:r => h(r.caracter_solicitacao), v:r => r.caracter_solicitacao },
+        { l:'Solicitada em', f:r => fmtDataHora(r.data_solicitacao), v:r => r.data_solicitacao },
+      ],
+    });
+    $('#mira-csv', el).onclick = () => baixarCSV(`mira_${hojeISO()}`, CAB, lote.map(linha));
+    $('#mira-json', el).onclick = () => {
+      const txt = JSON.stringify(lote.map(({ solicitacao_id, atualizado_em, ...resto }) => resto), null, 2);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([txt], { type:'application/json' }));
+      a.download = `mira_${hojeISO()}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      toast('Arquivo JSON gerado.', 'ok');
+    };
+  } else {
+    $('#mira-tab', el).innerHTML = estado({ titulo:'Nenhum registro completo ainda',
+      texto:'Resolva as pendências acima para os registros entrarem no lote.' });
+  }
+}
+
+async function pgAuditoria(el){
+  const [alt, aces, ret] = await Promise.all([
+    q(sb.from('historico_paciente').select('*, perfis(nome), pacientes(nome)').order('created_at', { ascending:false }).limit(300)),
+    q(sb.from('acessos_paciente').select('*, perfis(nome), pacientes(nome)').order('created_at', { ascending:false }).limit(300)),
+    q(sb.from('politica_retencao').select('*').order('tabela')),
+  ]);
+  el.innerHTML = `
+    <section class="card">
+      <div class="card-h"><h2>Alterações em cadastro de paciente</h2>
+        <span class="sub">300 mais recentes</span></div>
+      <div id="aud-alt"></div>
+    </section>
+    <section class="card">
+      <div class="card-h"><h2>Acessos a cadastro de paciente</h2>
+        <span class="sub">300 mais recentes</span></div>
+      <p class="muted">Registra abertura de cadastro pela aplicação — ficha, detalhe de solicitação e
+        impressão de guia. Acessos repetidos pelo mesmo usuário em 10 minutos contam como um.</p>
+      <div id="aud-ace"></div>
+    </section>
+    <section class="card">
+      <div class="card-h"><h2>Retenção</h2></div>
+      <p class="muted">Vale só para log operacional. Solicitação, histórico e cadastro de paciente são
+        registro assistencial e <b>nunca</b> são apagados por aqui.</p>
+      <div id="aud-ret"></div>
+      <div class="acoes" style="margin-top:12px"><button class="btn" id="aud-limpar">Aplicar retenção agora</button></div>
+    </section>`;
+
+  montarTabela($('#aud-alt', el), { linhas:alt, rotuloItens:'alteração(ões)', pagina:25,
+    vazio:'Nenhuma alteração registrada.',
+    colunas:[
+      { l:'Quando', f:r => fmtDataHora(r.created_at), v:r => r.created_at },
+      { l:'Paciente', f:r => h(r.pacientes?.nome || `#${r.paciente_id}`), v:r => r.pacientes?.nome || '' },
+      { l:'Campo', f:r => r.campo ? h(r.campo) : `<span class="tag inc">${h(r.operacao)}</span>`, v:r => r.campo || r.operacao },
+      { l:'De', f:r => h(r.valor_anterior ?? '—'), v:r => r.valor_anterior || '' },
+      { l:'Para', f:r => h(r.valor_novo ?? '—'), v:r => r.valor_novo || '' },
+      { l:'Quem', f:r => h(r.perfis?.nome || '—'), v:r => r.perfis?.nome || '' },
+    ] });
+
+  montarTabela($('#aud-ace', el), { linhas:aces, rotuloItens:'acesso(s)', pagina:25,
+    vazio:'Nenhum acesso registrado.',
+    colunas:[
+      { l:'Quando', f:r => fmtDataHora(r.created_at), v:r => r.created_at },
+      { l:'Paciente', f:r => h(r.pacientes?.nome || `#${r.paciente_id}`), v:r => r.pacientes?.nome || '' },
+      { l:'Quem', f:r => h(r.perfis?.nome || '—'), v:r => r.perfis?.nome || '' },
+      { l:'Onde', f:r => h(r.contexto || '—'), v:r => r.contexto || '' },
+    ] });
+
+  montarTabela($('#aud-ret', el), { linhas:ret, rotuloItens:'regra(s)', ordem:null,
+    colunas:[
+      { l:'Tabela', f:r => `<b>${h(r.tabela)}</b>`, v:r => r.tabela },
+      { l:'Guardar por', n:true, f:r => `${num(r.dias)} dia(s)`, v:r => r.dias },
+      { l:'Por quê', f:r => h(r.descricao || '—'), v:r => r.descricao || '' },
+    ] });
+
+  $('#aud-limpar', el).onclick = async e => {
+    const r = await confirmar({ titulo:'Aplicar retenção', botao:'Aplicar', cls:'warn',
+      html: alerta('warn', 'Apaga definitivamente os registros de log que passaram do prazo da tabela acima. '
+        + 'Nenhuma solicitação, histórico ou cadastro de paciente é tocado.', 'O que acontece') });
+    if(!r.ok) return;
+    const linhas = await ocupado(e.target, () => q(sb.rpc('aplicar_retencao')));
+    const n = linhas.reduce((a, l) => a + Number(l.apagados), 0);
+    aviso(n ? `${num(n)} registro(s) de log apagados.` : 'Nada estava fora do prazo.', 'ok');
+    navegar();
+  };
+}
+
 function pgVulnerabilidade(el){
   el.innerHTML = alerta('info',
     'A Política Nacional de Regulação manda a prioridade considerar risco, tempo de espera e '

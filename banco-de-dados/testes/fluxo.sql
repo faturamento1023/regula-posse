@@ -212,3 +212,123 @@ begin
 end $$;
 
 select 'TODOS OS TESTES DE FLUXO PASSARAM' as resultado;
+
+-- =====================================================================
+--  AUDITORIA DE PACIENTE, LOG DE ACESSO, MIRA E RETENÇÃO (migração 003)
+-- =====================================================================
+
+-- ---------- alteração em paciente deixa rastro ----------
+do $$
+declare n int;
+begin
+  update pacientes set telefone = '62988776655' where id = 1;
+  select count(*) into n from historico_paciente
+   where paciente_id = 1 and campo = 'telefone' and valor_novo = '62988776655' and usuario_id is not null;
+  if n <> 1 then raise exception 'a alteração de telefone não foi auditada'; end if;
+
+  -- campo que não mudou não gera linha
+  update pacientes set telefone = '62988776655' where id = 1;
+  select count(*) into n from historico_paciente where paciente_id = 1 and campo = 'telefone';
+  if n <> 1 then raise exception 'update sem mudança real não devia gerar auditoria'; end if;
+
+  -- o trigger é genérico: pega qualquer coluna, inclusive as que não existiam
+  update pacientes set nome_mae = 'Mãe Teste' where id = 1;
+  if not exists (select 1 from historico_paciente where campo = 'nome_mae') then
+    raise exception 'o trigger devia auditar qualquer coluna';
+  end if;
+end $$;
+
+-- ---------- log de acesso, com deduplicação ----------
+do $$
+declare n int;
+begin
+  perform registrar_acesso_paciente(1, 'ficha do paciente');
+  perform registrar_acesso_paciente(1, 'ficha do paciente');
+  select count(*) into n from acessos_paciente where paciente_id = 1 and contexto = 'ficha do paciente';
+  if n <> 1 then raise exception 'acessos repetidos na mesma janela deviam virar um registro só, vieram %', n; end if;
+
+  perform registrar_acesso_paciente(1, 'impressao de guia');
+  select count(*) into n from acessos_paciente where paciente_id = 1;
+  if n <> 2 then raise exception 'contexto diferente devia gerar registro próprio'; end if;
+end $$;
+
+-- ---------- MIRA ----------
+do $$
+declare r record; n int;
+begin
+  -- sem CNES na unidade e sem código SIGTAP, o registro não pode ser enviado
+  update unidades set cnes = null where id = 1;
+  if not exists (select 1 from mira_pendencias() where problema like '%CNES%') then
+    raise exception 'mira_pendencias devia apontar a falta de CNES';
+  end if;
+  select count(*) into n from mira_lote();
+  if n <> 0 then raise exception 'o lote não devia incluir registro sem CNES'; end if;
+
+  -- completando o cadastro
+  update unidades set cnes = '1234567' where id = 1;
+  update unidades set cnes = '9999999', reguladora = true where id = 2;
+  update procedimentos set codigo_sigtap = '0301010072', cbo = '225120' where id = 1;
+  update solicitacoes set cid10 = 'I20.0';
+
+  select * into r from vw_mira where solicitacao_id = 1;
+  if r.codigo_procedimento <> '0301010072' then raise exception 'código SIGTAP errado no MIRA'; end if;
+  if r.cnes_solicitante <> '1234567' then raise exception 'CNES do solicitante errado'; end if;
+  if r.cnes_regulador <> '9999999' then raise exception 'CNES do regulador errado'; end if;
+  if r.motivo_solicitacao <> 'I20.0' then raise exception 'CID-10 não chegou ao MIRA'; end if;
+  if r.identificador_paciente is null then raise exception 'o paciente precisa de CPF ou CNS'; end if;
+  if r.modalidade_assistencial <> 'ambulatorial' then raise exception 'modalidade errada'; end if;
+end $$;
+
+-- ---------- mapeamentos do MIRA ----------
+do $$
+begin
+  -- quatro níveis de risco viram dois caracteres
+  if mira_caracter('vermelho') <> 'urgencia' or mira_caracter('amarelo') <> 'urgencia' then
+    raise exception 'vermelho e amarelo deviam mapear para urgência';
+  end if;
+  if mira_caracter('verde') <> 'eletivo' or mira_caracter('azul') <> 'eletivo' then
+    raise exception 'verde e azul deviam mapear para eletivo';
+  end if;
+  -- oito status viram sete situações do modelo
+  if mira_status('pendente') <> 'pendente' or mira_status('autorizada') <> 'pendente' then
+    raise exception 'pendente e autorizada deviam mapear para pendente';
+  end if;
+  if mira_status('negada') <> 'negado_cancelado' or mira_status('cancelada') <> 'negado_cancelado' then
+    raise exception 'negada e cancelada deviam mapear para negado_cancelado';
+  end if;
+  if mira_status('devolvida') <> 'devolvido_solicitante' then raise exception 'devolvida mapeia errado'; end if;
+  if mira_status('realizada') <> 'atendido' then raise exception 'realizada mapeia errado'; end if;
+  if mira_status('faltou') <> 'falta' then raise exception 'faltou mapeia errado'; end if;
+end $$;
+
+-- ---------- retenção não encosta em registro assistencial ----------
+do $$
+declare r record; antes bigint;
+begin
+  select count(*) into antes from solicitacoes;
+  insert into acessos_paciente (paciente_id, usuario_id, contexto, created_at)
+  values (1, null, 'antigo', now() - interval '800 days');
+  for r in select * from aplicar_retencao() loop null; end loop;
+  if exists (select 1 from acessos_paciente where contexto = 'antigo') then
+    raise exception 'a retenção devia apagar o acesso de 800 dias';
+  end if;
+  if (select count(*) from solicitacoes) <> antes then
+    raise exception 'a retenção NUNCA pode apagar solicitação';
+  end if;
+  if not exists (select 1 from historico_paciente) then
+    raise exception 'a retenção NUNCA pode apagar auditoria de paciente';
+  end if;
+end $$;
+
+-- ---------- anon continua sem alcançar nada disso ----------
+do $$
+declare t text;
+begin
+  foreach t in array array['historico_paciente','acessos_paciente','politica_retencao','vw_mira'] loop
+    if has_table_privilege('anon', 'public.' || t, 'SELECT') then
+      raise exception 'anon não devia ter SELECT em %', t;
+    end if;
+  end loop;
+end $$;
+
+select 'TESTES DA MIGRAÇÃO 003 PASSARAM' as resultado;
