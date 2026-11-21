@@ -10,6 +10,9 @@
 --             vulnerabilidade, acompanhamento pelo paciente.
 --  Versão 7: auditoria do cadastro de paciente, log de acesso, exportação
 --             MIRA e política de retenção.
+--  Versão 8: cadastro de profissionais executantes.
+--  Versão 9: catálogo CID-10 com busca por código ou descrição.
+--  Versão 10: anexos da solicitação, em bucket privado do Storage.
 --
 --  Perfis de acesso:
 --    admin       -> tudo
@@ -1675,3 +1678,552 @@ begin
 end $$;
 
 -- MIGRACAO-003-FIM
+
+
+-- ---------------------------------------------------------------------
+-- 11. CADASTRO DE PROFISSIONAIS EXECUTANTES
+--     Bloco idêntico ao de banco-de-dados/migracoes/004-cadastro-de-profissionais.sql.
+--     Recria gerar_vagas e vw_mira: as definições anteriores ficam superadas.
+-- ---------------------------------------------------------------------
+-- MIGRACAO-004-INICIO
+
+-- ---------------------------------------------------------------------
+--  1. PROFISSIONAIS
+--
+--  Até aqui vagas.profissional era texto livre, e o autocompletar da tela
+--  de agendas era montado a partir dos nomes já digitados — ou seja,
+--  repetia junto os erros de digitação. "Dr. João Batista", "João B." e
+--  "JOAO BATISTA FERREIRA" viravam três profissionais diferentes para
+--  qualquer relatório.
+--
+--  O médico SOLICITANTE segue como texto livre de propósito: ele costuma
+--  ser de fora da rede do município, às vezes de outro estado, e exigir
+--  cadastro prévio travaria o registro da solicitação na recepção.
+--
+--  O CBO mora aqui, e não no procedimento, porque o elemento do MIRA é
+--  "especialidade médica do executante" — é do profissional que executa,
+--  não do procedimento. A coluna em procedimentos vira fallback.
+-- ---------------------------------------------------------------------
+create table if not exists profissionais (
+  id              bigint generated always as identity primary key,
+  nome            text not null,
+  conselho        text not null default 'CRM'
+                  check (conselho in ('CRM','COREN','CRO','CREFITO','CRP','CRN','CRFa','CRF','OUTRO')),
+  numero_conselho text,
+  uf_conselho     char(2),
+  cbo             text,
+  especialidade   text,
+  unidade_id      bigint references unidades(id),
+  ativo           boolean not null default true,
+  created_at      timestamptz not null default now()
+);
+
+-- Um mesmo registro de conselho não pode aparecer duas vezes. Fica fora
+-- do unique da tabela porque numero_conselho é opcional: profissional sem
+-- número cadastrado não deve colidir com outro igualmente sem número.
+create unique index if not exists profissionais_conselho_uniq
+  on profissionais (conselho, upper(numero_conselho), upper(uf_conselho))
+  where numero_conselho is not null and uf_conselho is not null;
+
+create index if not exists profissionais_nome_idx on profissionais (lower(nome));
+
+alter table vagas add column if not exists profissional_id bigint references profissionais(id);
+create index if not exists vagas_prof_idx on vagas (profissional_id);
+comment on column vagas.profissional is
+  'Mantido para as vagas criadas antes do cadastro de profissionais. Em vaga nova vem de profissionais.nome, via profissional_id.';
+
+alter table profissionais enable row level security;
+revoke all on profissionais from anon, authenticated;
+grant select on profissionais to authenticated;
+grant insert, update, delete on profissionais to authenticated;
+
+drop policy if exists prof_sel on profissionais;
+create policy prof_sel on profissionais for select to authenticated
+  using (tem_papel('admin','regulador','agendador','solicitante','executante'));
+drop policy if exists prof_mng on profissionais;
+create policy prof_mng on profissionais for all to authenticated
+  using (tem_papel('admin','agendador','regulador'))
+  with check (tem_papel('admin','agendador','regulador'));
+
+-- ---------------------------------------------------------------------
+--  2. GERAÇÃO DE VAGAS COM PROFISSIONAL CADASTRADO
+-- ---------------------------------------------------------------------
+-- A assinatura muda de text para bigint, então a versão antiga sai primeiro,
+-- senão as duas coexistem como sobrecarga e a chamada fica ambígua.
+drop function if exists gerar_vagas(bigint, bigint, text, date[], jsonb);
+create or replace function gerar_vagas(
+  p_unidade bigint, p_procedimento bigint, p_profissional bigint, p_datas date[], p_turnos jsonb
+) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  d date; t jsonb; m int; k int; n int := 0; ndias int := 0; ignoradas date[] := '{}';
+  v_prof text; hi time; hf time; itv int; qtd int;
+begin
+  if not tem_papel('admin','agendador','regulador') then raise exception 'Sem permissão para gerar vagas'; end if;
+  -- O nome é copiado para a vaga no momento da geração: se o profissional
+  -- for renomeado depois, a guia já impressa continua batendo com o papel
+  -- que o paciente tem na mão.
+  if p_profissional is not null then
+    select nome into v_prof from profissionais where id = p_profissional and ativo;
+    if v_prof is null then raise exception 'Profissional não encontrado ou inativo'; end if;
+  end if;
+  if p_datas is null or cardinality(p_datas) = 0 then raise exception 'Nenhuma data informada'; end if;
+  if cardinality(p_datas) > 400 then raise exception 'Máximo de 400 datas por vez'; end if;
+  if p_turnos is null or jsonb_array_length(p_turnos) = 0 then raise exception 'Informe pelo menos um turno'; end if;
+
+  for t in select * from jsonb_array_elements(p_turnos) loop
+    hi := (t->>'hora_ini')::time; hf := (t->>'hora_fim')::time;
+    itv := coalesce((t->>'intervalo')::int, 0); qtd := coalesce((t->>'qtd')::int, 1);
+    if qtd < 1 or qtd > 200 then raise exception 'Quantidade de vagas inválida (1 a 200)'; end if;
+    if itv <> 0 and (itv < 5 or hf <= hi) then raise exception 'Turno inválido: confira início, fim e intervalo'; end if;
+  end loop;
+
+  insert into unidade_procedimentos (unidade_id, procedimento_id)
+  values (p_unidade, p_procedimento) on conflict do nothing;
+
+  for d in select distinct x from unnest(p_datas) as x order by 1 loop
+    if d < current_date - 1 or exists (
+         select 1 from vagas where unidade_executante_id = p_unidade and procedimento_id = p_procedimento
+                               and data = d and profissional_id is not distinct from p_profissional) then
+      ignoradas := ignoradas || d; continue;
+    end if;
+    ndias := ndias + 1;
+    for t in select * from jsonb_array_elements(p_turnos) loop
+      hi := (t->>'hora_ini')::time; hf := (t->>'hora_fim')::time;
+      itv := coalesce((t->>'intervalo')::int, 0); qtd := coalesce((t->>'qtd')::int, 1);
+      if itv = 0 then
+        for k in 1 .. qtd loop
+          insert into vagas (unidade_executante_id, procedimento_id, profissional_id, profissional, data, hora)
+          values (p_unidade, p_procedimento, p_profissional, v_prof, d, hi);
+          n := n + 1;
+        end loop;
+      else
+        for m in 0 .. (extract(epoch from (hf - hi)) / 60)::int - 1 by itv loop
+          for k in 1 .. qtd loop
+            insert into vagas (unidade_executante_id, procedimento_id, profissional_id, profissional, data, hora)
+            values (p_unidade, p_procedimento, p_profissional, v_prof, d, hi + make_interval(mins => m));
+            n := n + 1;
+          end loop;
+        end loop;
+      end if;
+    end loop;
+  end loop;
+  return jsonb_build_object('vagas', n, 'datas', ndias, 'ignoradas', to_jsonb(ignoradas));
+end $$;
+
+-- ---------------------------------------------------------------------
+--  3. O MIRA PASSA A USAR O CBO DO PROFISSIONAL
+-- ---------------------------------------------------------------------
+drop function if exists mira_lote(date, date);
+drop view if exists vw_mira;
+create view vw_mira with (security_invoker = true) as
+select
+  s.protocolo                                   as identificador_registro,
+  mira_status(s.status)                         as status_solicitacao,
+  pr.codigo_sigtap                              as codigo_procedimento,
+  s.created_at                                  as data_solicitacao,
+  s.data_regulacao                              as data_autorizacao,
+  s.data_execucao                               as data_execucao,
+  coalesce(p.cns, p.cpf)                        as identificador_paciente,
+  case when p.cns is not null then 'cns' else 'cpf' end as tipo_identificador_paciente,
+  us.cnes                                       as cnes_solicitante,
+  (select u2.cnes from unidades u2 where u2.reguladora order by u2.id limit 1) as cnes_regulador,
+  ue.cnes                                       as cnes_executante,
+  -- O CBO do profissional que executa é o que o modelo pede; o do
+  -- procedimento fica como recurso para vaga sem profissional cadastrado.
+  coalesce(prof.cbo, pr.cbo)                    as cbo_executante,
+  pr.modalidade                                 as modalidade_assistencial,
+  mira_caracter(s.prioridade)                   as caracter_solicitacao,
+  s.cid10                                       as motivo_solicitacao,
+  s.id                                          as solicitacao_id,
+  s.updated_at                                  as atualizado_em
+from solicitacoes s
+join pacientes     p  on p.id  = s.paciente_id
+join procedimentos pr on pr.id = s.procedimento_id
+join unidades      us on us.id = s.unidade_solicitante_id
+left join vagas    v  on v.id  = s.vaga_id
+left join unidades ue on ue.id = v.unidade_executante_id
+left join profissionais prof on prof.id = v.profissional_id;
+
+revoke all on vw_mira from anon, authenticated;
+
+create or replace function mira_lote(p_de date default null, p_ate date default null)
+returns setof vw_mira
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if not tem_papel('admin','regulador') then
+    raise exception 'Acesso à exportação MIRA restrito à regulação.' using errcode = '42501';
+  end if;
+  return query
+    select * from vw_mira
+     where codigo_procedimento is not null
+       and identificador_paciente is not null
+       and cnes_solicitante is not null
+       and motivo_solicitacao is not null
+       and (p_de  is null or atualizado_em::date >= p_de)
+       and (p_ate is null or atualizado_em::date <= p_ate)
+     order by atualizado_em;
+end
+$$;
+
+do $$
+declare fn regprocedure;
+begin
+ for fn in select p.oid::regprocedure from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname = 'public' and p.proname in ('gerar_vagas','mira_lote')
+ loop
+   execute format('revoke all on function %s from public, anon', fn);
+   execute format('grant execute on function %s to authenticated', fn);
+ end loop;
+end $$;
+
+-- MIGRACAO-004-FIM
+
+
+-- ---------------------------------------------------------------------
+-- 12. CATÁLOGO CID-10
+--     Bloco idêntico ao de banco-de-dados/migracoes/005-catalogo-cid10.sql.
+--     Os códigos em si vêm dos lotes de data/cid10/, gerados pelo workflow
+--     "Preparar CID-10".
+-- ---------------------------------------------------------------------
+-- MIGRACAO-005-INICIO
+
+-- ---------------------------------------------------------------------
+--  1. CATÁLOGO
+--
+--  solicitacoes.cid10 era texto livre com maxlength 6. Isso aceita I20,
+--  i20, "I 20" e I20.O com a letra O no lugar do zero — e o MIRA exige o
+--  motivo da solicitação em CID-10 como campo obrigatório, então código
+--  inválido vira registro recusado na transmissão.
+--
+--  Guardamos as categorias (3 caracteres, como I20) e as subcategorias
+--  (4 caracteres, como I20.0), porque o médico escreve as duas formas.
+--
+--  O código é guardado com ponto, que é como se escreve na receita e no
+--  pedido. codigo_limpo existe para a busca e para comparar com sistemas
+--  que gravam sem pontuação.
+-- ---------------------------------------------------------------------
+create table if not exists cid10 (
+  codigo       text primary key,
+  codigo_limpo text generated always as (replace(codigo, '.', '')) stored,
+  descricao    text not null,
+  nivel        text not null check (nivel in ('categoria','subcategoria')),
+  capitulo     text,
+  competencia  text
+);
+create index if not exists cid10_limpo_idx on cid10 (codigo_limpo);
+create index if not exists cid10_desc_idx  on cid10 (lower(descricao));
+
+alter table cid10 enable row level security;
+revoke all on cid10 from anon, authenticated;
+grant select on cid10 to authenticated;
+drop policy if exists cid_sel on cid10;
+create policy cid_sel on cid10 for select to authenticated
+  using (tem_papel('admin','regulador','agendador','solicitante','executante'));
+
+-- ---------------------------------------------------------------------
+--  2. VALIDAÇÃO
+--
+--  Enquanto o catálogo estiver vazio, aceita qualquer coisa com formato
+--  de CID: é o que permite aplicar esta migração antes de importar os
+--  lotes sem travar o registro de solicitação na recepção.
+-- ---------------------------------------------------------------------
+create or replace function cid10_valido(p text) returns boolean
+language plpgsql stable set search_path = public as $$
+declare v text;
+begin
+  v := upper(regexp_replace(coalesce(p, ''), '[^0-9A-Za-z]', '', 'g'));
+  if v = '' then return true; end if;                 -- vazio é tratado por quem chama
+  if v !~ '^[A-Z][0-9]{2}[0-9]?$' then return false; end if;
+  if not exists (select 1 from cid10) then return true; end if;   -- catálogo ainda não importado
+  return exists (select 1 from cid10 where codigo_limpo = v);
+end $$;
+
+/* Busca para a tela: por código ou por parte da descrição. Fica em função
+   para o cliente não precisar baixar 14 mil linhas na memória — foi o erro
+   que já existe com os procedimentos e que não vamos repetir aqui. */
+create or replace function buscar_cid10(p_termo text, p_limite int default 20)
+returns table (codigo text, descricao text, nivel text)
+language sql stable security definer set search_path = public as $$
+  with t as (select upper(trim(coalesce(p_termo, ''))) as termo)
+  select c.codigo, c.descricao, c.nivel
+    from cid10 c, t
+   where length(t.termo) >= 2
+     and (c.codigo_limpo like replace(t.termo, '.', '') || '%'
+          or c.descricao ilike '%' || t.termo || '%')
+   order by (c.codigo_limpo like replace(t.termo, '.', '') || '%') desc,
+            length(c.codigo), c.codigo
+   limit least(greatest(coalesce(p_limite, 20), 1), 50)
+$$;
+
+-- ---------------------------------------------------------------------
+--  3. O MIRA PASSA A APONTAR CID FORA DO CATÁLOGO
+-- ---------------------------------------------------------------------
+create or replace function mira_pendencias()
+returns table (problema text, solicitacoes bigint, como_resolver text)
+language sql stable security definer set search_path = public as $$
+  select * from (
+    select 'Solicitação sem CID-10'::text, count(*),
+           'O MIRA exige o motivo da solicitação em CID-10. Preencha na solicitação.'::text
+      from solicitacoes where coalesce(trim(cid10), '') = ''
+    union all
+    select 'Solicitação com CID-10 fora do catálogo', count(*),
+           'O código não existe na CID-10. Corrija na solicitação; o Ministério recusa código inválido.'
+      from solicitacoes
+     where coalesce(trim(cid10), '') <> '' and not cid10_valido(cid10)
+    union all
+    select 'Procedimento sem código SIGTAP', count(*),
+           'O MIRA exige o código do procedimento. Preencha em Procedimentos.'
+      from solicitacoes s join procedimentos pr on pr.id = s.procedimento_id
+     where coalesce(trim(pr.codigo_sigtap), '') = ''
+    union all
+    select 'Unidade solicitante sem CNES', count(*),
+           'O MIRA exige o CNES do estabelecimento solicitante. Preencha em Locais e unidades.'
+      from solicitacoes s join unidades u on u.id = s.unidade_solicitante_id
+     where coalesce(trim(u.cnes), '') = ''
+    union all
+    select 'Paciente sem CPF e sem Cartão SUS', count(*),
+           'O MIRA identifica o paciente por CPF ou CNS. Complete o cadastro.'
+      from solicitacoes s join pacientes p on p.id = s.paciente_id
+     where coalesce(trim(p.cns), '') = '' and coalesce(trim(p.cpf), '') = ''
+    union all
+    select 'Nenhuma unidade marcada como reguladora', count(*),
+           'Marque a unidade que opera a central em Locais e unidades: o CNES dela é o do estabelecimento regulador.'
+      from solicitacoes
+     where not exists (select 1 from unidades where reguladora)
+  ) t(problema, solicitacoes, como_resolver)
+  where t.solicitacoes > 0
+  order by t.solicitacoes desc
+$$;
+
+do $$
+declare fn regprocedure;
+begin
+ for fn in select p.oid::regprocedure from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname = 'public' and p.proname in ('cid10_valido','buscar_cid10','mira_pendencias')
+ loop
+   execute format('revoke all on function %s from public, anon', fn);
+   execute format('grant execute on function %s to authenticated', fn);
+ end loop;
+end $$;
+
+-- MIGRACAO-005-FIM
+
+
+-- ---------------------------------------------------------------------
+-- 13. ANEXOS DA SOLICITAÇÃO
+--     Bloco idêntico ao de banco-de-dados/migracoes/006-anexos.sql.
+--     Recria vw_solicitacoes com a contagem de anexos.
+-- ---------------------------------------------------------------------
+-- MIGRACAO-006-INICIO
+
+-- ---------------------------------------------------------------------
+--  1. REGISTRO DOS ANEXOS
+--
+--  Sem isto, o regulador decide sem ver o documento que fundamenta o
+--  pedido: ele lê uma justificativa digitada pela atendente, que leu o
+--  papel do médico. E o papel continua tendo que viajar até a central,
+--  de modo que o sistema não substitui o processo em papel — vira mais
+--  uma etapa em cima dele.
+--
+--  O arquivo em si vai para o Storage do Supabase, em bucket PRIVADO. Aqui
+--  fica só o registro: quem enviou, quando, que documento é e onde está.
+-- ---------------------------------------------------------------------
+create table if not exists anexos (
+  id             bigint generated always as identity primary key,
+  solicitacao_id bigint not null references solicitacoes(id) on delete cascade,
+  caminho        text   not null unique,
+  nome_original  text   not null,
+  tipo           text   not null,
+  tamanho        int    not null check (tamanho > 0),
+  documento      text   not null default 'pedido'
+                 check (documento in ('pedido','exame','outro')),
+  enviado_por    uuid references perfis(id) on delete set null,
+  created_at     timestamptz not null default now()
+);
+create index if not exists anexos_sol_idx on anexos (solicitacao_id, created_at);
+
+alter table anexos enable row level security;
+revoke all on anexos from anon, authenticated;
+grant select, insert, delete on anexos to authenticated;
+
+/* Quem enxerga a solicitação enxerga os anexos dela. A subconsulta passa
+   pelo RLS de solicitacoes, então a regra de visibilidade fica num lugar
+   só e não precisa ser repetida aqui. */
+drop policy if exists anx_sel on anexos;
+create policy anx_sel on anexos for select to authenticated
+  using (exists (select 1 from solicitacoes s where s.id = anexos.solicitacao_id));
+
+drop policy if exists anx_ins on anexos;
+create policy anx_ins on anexos for insert to authenticated
+  with check (
+    tem_papel('admin','regulador','agendador')
+    or (tem_papel('solicitante') and exists (
+          select 1 from solicitacoes s
+           where s.id = anexos.solicitacao_id and s.unidade_solicitante_id = minha_unidade())));
+
+/* Apagar anexo é destrutivo e o documento fundamenta a solicitação, então
+   fica com a central. A unidade de origem corrige enviando outro. */
+drop policy if exists anx_del on anexos;
+create policy anx_del on anexos for delete to authenticated
+  using (tem_papel('admin','regulador','agendador'));
+
+-- ---------------------------------------------------------------------
+--  2. BUCKET PRIVADO E ACESSO AO ARQUIVO
+--
+--  O caminho é "<solicitacao_id>/<arquivo>", e é dele que sai a regra de
+--  acesso: quem enxerga a solicitação enxerga o arquivo. Bucket privado,
+--  então a leitura só acontece por URL assinada, com validade curta.
+-- ---------------------------------------------------------------------
+do $$
+begin
+  if to_regclass('storage.buckets') is null then
+    raise notice 'Schema storage ausente: pulei bucket e políticas de arquivo.';
+    return;
+  end if;
+
+  insert into storage.buckets (id, name, public)
+  values ('anexos', 'anexos', false)
+  on conflict (id) do update set public = false;
+end $$;
+
+create or replace function sol_do_caminho(p_caminho text) returns bigint
+language sql immutable as $$
+  select nullif(regexp_replace(split_part(coalesce(p_caminho, ''), '/', 1), '\D', '', 'g'), '')::bigint
+$$;
+
+create or replace function pode_ver_anexo(p_caminho text) returns boolean
+language sql stable set search_path = public as $$
+  -- O RLS de solicitacoes decide. Função existe para a política do Storage
+  -- não precisar repetir a regra de visibilidade.
+  select exists (select 1 from solicitacoes s where s.id = sol_do_caminho(p_caminho))
+$$;
+
+create or replace function pode_anexar(p_caminho text) returns boolean
+language sql stable set search_path = public as $$
+  select tem_papel('admin','regulador','agendador')
+      or (tem_papel('solicitante') and exists (
+            select 1 from solicitacoes s
+             where s.id = sol_do_caminho(p_caminho)
+               and s.unidade_solicitante_id = minha_unidade()))
+$$;
+
+do $$
+begin
+  if to_regclass('storage.objects') is null then return; end if;
+
+  execute 'drop policy if exists anexo_ler on storage.objects';
+  execute $p$create policy anexo_ler on storage.objects for select to authenticated
+             using (bucket_id = 'anexos' and pode_ver_anexo(name))$p$;
+
+  execute 'drop policy if exists anexo_enviar on storage.objects';
+  execute $p$create policy anexo_enviar on storage.objects for insert to authenticated
+             with check (bucket_id = 'anexos' and pode_anexar(name))$p$;
+
+  execute 'drop policy if exists anexo_apagar on storage.objects';
+  execute $p$create policy anexo_apagar on storage.objects for delete to authenticated
+             using (bucket_id = 'anexos' and tem_papel('admin','regulador','agendador'))$p$;
+end $$;
+
+-- ---------------------------------------------------------------------
+--  3. QUANTOS ANEXOS CADA SOLICITAÇÃO TEM
+--  A contagem entra na view para as listas marcarem quem está sem pedido
+--  anexado, sem uma consulta por linha.
+-- ---------------------------------------------------------------------
+drop function if exists mira_lote(date, date);
+-- Sem cascade de propósito: nada depende desta view hoje, e se um dia
+-- algo depender é melhor a migração falhar e avisar do que apagar em
+-- silêncio um objeto que alguém criou no banco do município.
+drop view if exists vw_solicitacoes;
+create view vw_solicitacoes with (security_invoker = true) as
+select
+  s.*,
+  p.nome            as paciente_nome,
+  p.nome_social     as paciente_nome_social,
+  p.cns             as paciente_cns,
+  p.cpf             as paciente_cpf,
+  p.data_nascimento as paciente_nascimento,
+  p.sexo            as paciente_sexo,
+  p.telefone        as paciente_telefone,
+  p.telefone2       as paciente_telefone2,
+  p.nome_mae        as paciente_mae,
+  concat_ws(', ', nullif(p.logradouro,''), nullif(p.numero,''), nullif(p.complemento,''),
+            nullif(p.bairro,''), nullif(concat_ws('/', nullif(p.cidade,''), nullif(p.uf,'')),'')) as paciente_endereco,
+  pr.nome           as procedimento_nome,
+  pr.exige_regulacao,
+  pr.codigo_sigtap  as procedimento_codigo,
+  pr.tipo           as procedimento_tipo,
+  pr.especialidade,
+  u.nome            as unidade_solicitante_nome,
+  uo.nome           as unidade_origem_nome,
+  v.data            as vaga_data,
+  v.hora            as vaga_hora,
+  v.profissional    as vaga_profissional,
+  v.unidade_executante_id,
+  ue.nome           as unidade_executante_nome,
+  ue.endereco       as unidade_executante_endereco,
+  ue.telefone       as unidade_executante_telefone,
+  rg.nome           as regulador_nome,
+  cf.nome           as confirmado_por_nome,
+  (current_date - s.created_at::date)   as dias_espera,
+  (current_date - s.data_pedido)        as dias_desde_pedido,
+  (s.created_at::date - s.data_pedido)  as dias_ate_insercao,
+  coalesce(vu.peso, 0)                  as peso_vulnerabilidade,
+  coalesce(vu.nomes, array[]::text[])   as vulnerabilidades,
+  coalesce(ax.total, 0)                 as anexos,
+  coalesce(ax.pedidos, 0)               as anexos_pedido,
+  case s.prioridade when 'vermelho' then 1 when 'amarelo' then 2
+                    when 'verde' then 3 else 4 end as peso_prioridade
+from solicitacoes s
+join pacientes     p  on p.id  = s.paciente_id
+join procedimentos pr on pr.id = s.procedimento_id
+join unidades      u  on u.id  = s.unidade_solicitante_id
+left join unidades uo on uo.id = s.unidade_origem_id
+left join vagas    v  on v.id  = s.vaga_id
+left join unidades ue on ue.id = v.unidade_executante_id
+left join perfis   rg on rg.id = s.regulador_id
+left join perfis   cf on cf.id = s.confirmado_por
+left join lateral (
+  select sum(c.peso) as peso, array_agg(c.nome order by c.nome) as nomes
+    from solicitacao_vulnerabilidade sv
+    join criterios_vulnerabilidade c on c.id = sv.criterio_id and c.ativo
+   where sv.solicitacao_id = s.id
+) vu on true
+left join lateral (
+  select count(*) as total, count(*) filter (where a.documento = 'pedido') as pedidos
+    from anexos a where a.solicitacao_id = s.id
+) ax on true;
+
+grant select on vw_solicitacoes to authenticated;
+
+create or replace function mira_lote(p_de date default null, p_ate date default null)
+returns setof vw_mira
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if not tem_papel('admin','regulador') then
+    raise exception 'Acesso à exportação MIRA restrito à regulação.' using errcode = '42501';
+  end if;
+  return query
+    select * from vw_mira
+     where codigo_procedimento is not null
+       and identificador_paciente is not null
+       and cnes_solicitante is not null
+       and motivo_solicitacao is not null
+       and (p_de  is null or atualizado_em::date >= p_de)
+       and (p_ate is null or atualizado_em::date <= p_ate)
+     order by atualizado_em;
+end
+$$;
+
+do $$
+declare fn regprocedure;
+begin
+ for fn in select p.oid::regprocedure from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname = 'public' and p.proname in ('pode_ver_anexo','pode_anexar','sol_do_caminho','mira_lote')
+ loop
+   execute format('revoke all on function %s from public, anon', fn);
+   execute format('grant execute on function %s to authenticated', fn);
+ end loop;
+end $$;
+
+-- MIGRACAO-006-FIM

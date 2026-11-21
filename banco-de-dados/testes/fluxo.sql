@@ -332,3 +332,144 @@ begin
 end $$;
 
 select 'TESTES DA MIGRAÇÃO 003 PASSARAM' as resultado;
+
+-- =====================================================================
+--  CADASTRO DE PROFISSIONAIS (migração 004)
+-- =====================================================================
+do $$
+declare r jsonb; n int;
+begin
+  insert into profissionais (nome, conselho, numero_conselho, uf_conselho, cbo, especialidade, unidade_id)
+  values ('Dr. Teste Executante', 'CRM', '12345', 'GO', '225120', 'Cardiologia', 2);
+
+  -- o mesmo registro de conselho não pode entrar duas vezes
+  begin
+    insert into profissionais (nome, conselho, numero_conselho, uf_conselho)
+    values ('Outro Nome', 'CRM', '12345', 'GO');
+    raise exception 'conselho duplicado devia ser recusado';
+  exception when unique_violation then null;
+  end;
+
+  -- mas dois sem número de registro convivem
+  insert into profissionais (nome, conselho) values ('Sem Registro A', 'CRM');
+  insert into profissionais (nome, conselho) values ('Sem Registro B', 'CRM');
+
+  -- gerar_vagas mantém o formato de retorno do original e copia o nome
+  r := gerar_vagas(2, 1, 1, array[current_date + 30],
+         '[{"hora_ini":"08:00","hora_fim":"10:00","intervalo":30,"qtd":1}]'::jsonb);
+  if (r->>'vagas')::int <> 4 then raise exception 'esperadas 4 vagas, vieram %', r->>'vagas'; end if;
+  if r->'ignoradas' is null then raise exception 'o retorno perdeu o campo ignoradas'; end if;
+
+  select count(*) into n from vagas
+   where profissional_id = 1 and profissional = 'Dr. Teste Executante' and data = current_date + 30;
+  if n <> 4 then raise exception 'a vaga devia guardar o id e o nome do profissional'; end if;
+
+  -- intervalo zero continua criando todas no mesmo horário
+  r := gerar_vagas(2, 1, 1, array[current_date + 31],
+         '[{"hora_ini":"13:00","hora_fim":"13:00","intervalo":0,"qtd":5}]'::jsonb);
+  if (r->>'vagas')::int <> 5 then raise exception 'mutirão devia criar 5 vagas, criou %', r->>'vagas'; end if;
+
+  -- repetir a data devolve a data em ignoradas, sem duplicar vaga
+  r := gerar_vagas(2, 1, 1, array[current_date + 30],
+         '[{"hora_ini":"08:00","hora_fim":"09:00","intervalo":30,"qtd":1}]'::jsonb);
+  if jsonb_array_length(r->'ignoradas') <> 1 then raise exception 'data repetida devia ser ignorada'; end if;
+
+  -- profissional inativo ou inexistente é recusado
+  update profissionais set ativo = false where id = 2;
+  begin
+    perform gerar_vagas(2, 1, 2, array[current_date + 40],
+              '[{"hora_ini":"08:00","hora_fim":"09:00","intervalo":30,"qtd":1}]'::jsonb);
+    raise exception 'profissional inativo devia ser recusado';
+  exception when others then
+    if sqlerrm = 'profissional inativo devia ser recusado' then raise; end if;
+  end;
+end $$;
+
+-- o MIRA passa a usar o CBO do profissional, não o do procedimento
+do $$
+declare r record;
+begin
+  update procedimentos set cbo = '999999' where id = 1;
+  update solicitacoes set vaga_id = (select id from vagas where profissional_id = 1 limit 1) where id = 1;
+  select * into r from vw_mira where solicitacao_id = 1;
+  if r.cbo_executante <> '225120' then
+    raise exception 'o CBO devia vir do profissional (225120), veio %', r.cbo_executante;
+  end if;
+end $$;
+
+select 'TESTES DA MIGRAÇÃO 004 PASSARAM' as resultado;
+
+-- =====================================================================
+--  CATÁLOGO CID-10 (migração 005)
+-- =====================================================================
+do $$
+begin
+  -- Catálogo vazio: aceita o que tem formato de CID e recusa o resto. É o
+  -- que permite aplicar a migração antes de importar os lotes sem travar o
+  -- registro de solicitação na recepção.
+  if not cid10_valido('I20')   then raise exception 'catálogo vazio devia aceitar I20'; end if;
+  if not cid10_valido('I20.0') then raise exception 'catálogo vazio devia aceitar I20.0'; end if;
+  if not cid10_valido('')      then raise exception 'vazio é tratado por quem chama'; end if;
+  if cid10_valido('I20.O')     then raise exception 'letra O no lugar do zero devia ser recusada'; end if;
+  if cid10_valido('X')         then raise exception 'código curto devia ser recusado'; end if;
+  if cid10_valido('ABC12')     then raise exception 'formato inválido devia ser recusado'; end if;
+end $$;
+
+insert into cid10 (codigo, descricao, nivel, capitulo, competencia) values
+  ('I20',   'Angina pectoris',                  'categoria',    'IX',   '2008'),
+  ('I20.0', 'Angina instável',                  'subcategoria', 'IX',   '2008'),
+  ('I10',   'Hipertensão essencial (primária)', 'categoria',    'IX',   '2008'),
+  ('M54.5', 'Dor lombar baixa',                 'subcategoria', 'XIII', '2008');
+
+do $$
+declare n int;
+begin
+  -- Com catálogo, só passa o que existe
+  if not cid10_valido('I20.0') then raise exception 'I20.0 existe e devia passar'; end if;
+  if not cid10_valido('i200')  then raise exception 'minúsculo e sem ponto devia passar'; end if;
+  if cid10_valido('I20.9')     then raise exception 'I20.9 não está no catálogo e devia ser recusado'; end if;
+
+  -- codigo_limpo é gerado pelo banco
+  if (select codigo_limpo from cid10 where codigo = 'M54.5') <> 'M545' then
+    raise exception 'codigo_limpo devia tirar o ponto';
+  end if;
+
+  -- Busca por código e por descrição
+  select count(*) into n from buscar_cid10('I20');
+  if n <> 2 then raise exception 'busca por I20 devia achar 2, achou %', n; end if;
+  select count(*) into n from buscar_cid10('lombar');
+  if n <> 1 then raise exception 'busca por descrição devia achar 1, achou %', n; end if;
+  select count(*) into n from buscar_cid10('hipertens');
+  if n <> 1 then raise exception 'busca parcial por descrição devia achar 1, achou %', n; end if;
+
+  -- Termo curto não varre a tabela inteira
+  select count(*) into n from buscar_cid10('I');
+  if n <> 0 then raise exception 'termo de 1 caractere não devia buscar'; end if;
+
+  -- O limite é respeitado e tem teto
+  select count(*) into n from buscar_cid10('I', 999);
+  if n <> 0 then raise exception 'termo curto continua sem buscar mesmo com limite alto'; end if;
+end $$;
+
+-- O MIRA passa a apontar CID fora do catálogo
+do $$
+begin
+  update solicitacoes set cid10 = 'Z99.9' where id = 1;   -- formato válido, fora do catálogo
+  if not exists (select 1 from mira_pendencias() where problema like '%fora do catálogo%') then
+    raise exception 'mira_pendencias devia apontar CID fora do catálogo';
+  end if;
+  update solicitacoes set cid10 = 'I20.0' where id = 1;
+  if exists (select 1 from mira_pendencias() where problema like '%fora do catálogo%') then
+    raise exception 'com CID válido não devia haver pendência de catálogo';
+  end if;
+end $$;
+
+-- anon não alcança o catálogo
+do $$
+begin
+  if has_table_privilege('anon', 'public.cid10', 'SELECT') then
+    raise exception 'anon não devia ler cid10';
+  end if;
+end $$;
+
+select 'TESTES DA MIGRAÇÃO 005 PASSARAM' as resultado;

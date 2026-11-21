@@ -55,6 +55,15 @@ node ferramentas/verificar-csp.mjs     # nada de script inline, origens conferem
 node ferramentas/verificar-migracoes.mjs
 ```
 
+E, contra um Postgres com o stub do Supabase aplicado:
+
+```sh
+psql -f banco-de-dados/testes/fluxo.sql   # regras de negócio
+psql -f banco-de-dados/testes/rls.sql     # isolamento entre unidades e perfis
+```
+
+**Por que os testes de RLS ficam num arquivo separado:** `fluxo.sql` roda como dono das tabelas, e no Postgres o dono ignora row level security. Ele verifica regra de negócio e `grant`, mas **não** verifica as políticas — uma política errada passaria despercebida. Em `rls.sql` todo teste de visibilidade roda com `set role authenticated`, que é o papel que o cliente usa de verdade.
+
 O mesmo roda no CI (`.github/workflows/ci.yml`), que ainda aplica o schema e as migrações num Postgres limpo e confere que as restrições de CPF e CNS barram documento inválido.
 
 ### Regras que o projeto segue
@@ -120,6 +129,44 @@ Três registros diferentes, que respondem perguntas diferentes:
 Os três ficam em **Administração → Auditoria**, visíveis só para administrador.
 
 Um limite do log de acesso que precisa ficar claro: o cliente lê a tabela `pacientes` direto pelo PostgREST, então ele **não** intercepta toda consulta ao banco. Registra abertura deliberada de cadastro pela aplicação — ficha, detalhe de solicitação e impressão de guia. Interceptar toda leitura exigiria tirar o acesso direto à tabela e passar tudo por função; está na lista de pendências.
+
+## Profissionais
+
+**Administração → Profissionais** cadastra quem **atende**: os nomes que entram nas agendas e saem impressos na guia do paciente. Antes era texto livre na criação de agenda, com autocompletar montado a partir do que já havia sido digitado — ou seja, repetia junto os erros de digitação, e "Dr. João Batista", "João B." e "JOAO BATISTA" viravam três profissionais em qualquer relatório.
+
+O médico que **assina o pedido** segue como texto livre de propósito: costuma ser de fora da rede do município, às vezes de outro estado, e exigir cadastro prévio travaria o registro na recepção.
+
+O **CBO** mora no profissional, não no procedimento, porque o elemento do MIRA é "especialidade médica do executante". A coluna `procedimentos.cbo` continua existindo como recurso para vaga sem profissional vinculado.
+
+A vaga guarda o id **e** o nome do profissional. A cópia do nome é intencional: se o cadastro for renomeado depois, a guia já impressa continua batendo com o papel que o paciente tem na mão.
+
+## Anexos
+
+A solicitação aceita o **pedido ou encaminhamento do médico** e os **exames**, anexados na etapa 2 do registro. Sem isso o regulador decide sem ver o documento que fundamenta o pedido — ele lê uma justificativa digitada pela atendente, que leu o papel do médico — e o papel continua tendo que viajar até a central, de modo que o sistema não substitui o processo em papel, vira mais uma etapa em cima dele.
+
+Os arquivos vão para um bucket **privado** do Storage. A leitura é sempre por URL assinada de validade curta, e o acesso é decidido pelo RLS da solicitação: quem enxerga a solicitação enxerga os anexos dela, e quem não enxerga recebe zero. A regra fica num lugar só e não é repetida na política do Storage.
+
+Imagem é reduzida para no máximo 1600 px e recomprimida em JPEG **no navegador, antes de subir** — foto de pedido tirada com celular passa de 3 MB, e o armazenamento do plano é limitado. PDF sobe como está: recomprimir PDF no cliente arrisca perder legibilidade de exame.
+
+Limites: PDF ou imagem, até 8 MB por arquivo e 5 documentos por solicitação.
+
+Os anexos sobem **depois** do registro, porque o caminho no bucket é derivado do id da solicitação e é dele que sai a regra de acesso. Falha no envio não desfaz o registro: a solicitação existe e o documento pode ser anexado de novo.
+
+## Catálogo CID-10
+
+O campo CID-10 da solicitação era texto livre com `maxlength` 6 — aceitava `I20`, `i20`, `I 20` e `I20.O` com a letra O no lugar do zero. Como o MIRA exige o motivo da solicitação em CID-10, código inválido vira registro recusado na transmissão.
+
+Agora existe a tabela `cid10` com as categorias (3 caracteres, como `I20`) e as subcategorias (4 caracteres, como `I20.0`), porque o médico escreve as duas formas. O campo na tela busca por código **ou por parte do nome da doença**: digitar "hipertensão" encontra `I10`.
+
+São cerca de 14 mil códigos, e eles **não** vão para a memória do navegador — a busca é feita no banco pela função `buscar_cid10()`. É deliberadamente o oposto do que acontece hoje com os procedimentos, que são carregados inteiros a cada login e estão na lista de pendências por isso.
+
+### Importar o catálogo
+
+O workflow **Preparar CID-10** (`.github/workflows/preparar-cid10.yml`) baixa os CSVs do DATASUS, converte em lotes SQL em `data/cid10/` e registra origem, contagem e hash no manifesto — mesmo padrão da SIGTAP. Rode-o em Actions e depois aplique os lotes no SQL Editor.
+
+Ele tenta primeiro a URL oficial do DATASUS e só então um espelho, e grava no manifesto qual das duas respondeu. As validações são propositalmente rígidas: se a contagem de categorias ou subcategorias sair das faixas esperadas, se houver código duplicado ou com formato inesperado, ou se o código de referência `I20` não estiver presente, o workflow falha em vez de comitar um catálogo truncado.
+
+**Enquanto o catálogo não for importado, o campo continua aceitando digitação livre** com formato de CID. É o que permite aplicar a migração antes de rodar o workflow sem travar o registro de solicitação na recepção.
 
 ## Envio ao Ministério (MIRA)
 

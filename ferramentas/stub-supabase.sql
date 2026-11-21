@@ -20,3 +20,21 @@ create or replace function auth.uid() returns uuid
   language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
 create or replace function auth.role() returns text
   language sql stable as $$ select coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), 'authenticated') $$;
+
+-- Arremedo do Storage, para as políticas de anexo poderem ser criadas e
+-- testadas aqui. O Supabase real tem muito mais colunas; estas são as que
+-- as políticas do projeto usam.
+create schema if not exists storage;
+create table if not exists storage.buckets (
+  id text primary key, name text not null, public boolean not null default false
+);
+create table if not exists storage.objects (
+  id uuid primary key default gen_random_uuid(),
+  bucket_id text references storage.buckets(id),
+  name text not null,
+  owner uuid,
+  created_at timestamptz not null default now()
+);
+alter table storage.objects enable row level security;
+grant select, insert, delete on storage.objects to authenticated;
+grant select on storage.buckets to authenticated;

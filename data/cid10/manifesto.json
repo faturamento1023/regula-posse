@@ -1,0 +1,12 @@
+{
+  "registros": 14233,
+  "categorias": 2045,
+  "subcategorias": 12188,
+  "partes": 18,
+  "sha256_zip": "84f23809275575f751255048064bbb244b0de33fd5987ab98df0f98e5f5d2c95",
+  "fonte": "http://www2.datasus.gov.br/cid10/V2008/downloads/CID10CSV.zip",
+  "fontes_tentadas": [
+    "http://www2.datasus.gov.br/cid10/V2008/downloads/CID10CSV.zip",
+    "https://github.com/msrodrigues/cid10/raw/master/data-raw/CID10CSV.zip"
+  ]
+}

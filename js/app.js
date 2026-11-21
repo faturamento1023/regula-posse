@@ -39,7 +39,7 @@ const store = {
 };
 
 let sb = null;
-const S = { user:null, perfil:null, unidades:[], procedimentos:[], unProc:[], profs:[] };
+const S = { user:null, perfil:null, unidades:[], procedimentos:[], unProc:[], profs:[], profissionais:[] };
 
 const PRIORIDADES = {
   vermelho:{ l:'Vermelho', d:'Emergência', c:'var(--p-vermelho)', s:'◆' },
@@ -138,6 +138,158 @@ function registrarAcesso(pacienteId, contexto){
 window.addEventListener('error', e => registrarErro(e.error ?? e.message, 'window.onerror'));
 window.addEventListener('unhandledrejection', e => registrarErro(e.reason, 'promessa não tratada'));
 
+/* =====================================================================
+   BUSCA DE CID-10
+   O catálogo tem cerca de 14 mil códigos, então ele NÃO vai para a memória
+   do navegador: a busca é feita no banco, por código ou por parte da
+   descrição. Enquanto o catálogo não tiver sido importado, o campo segue
+   aceitando digitação livre — é o que permite aplicar a migração antes de
+   rodar o workflow sem travar o registro na recepção.
+   ===================================================================== */
+async function ligarBuscaCID(root, id = 'sw-cid10'){
+  const campo = $('#' + id, root);
+  if(!campo) return;
+
+  const caixa = document.createElement('div');
+  caixa.className = 'busca-cid';
+  caixa.setAttribute('aria-live', 'polite');
+  campo.insertAdjacentElement('afterend', caixa);
+
+  const descrever = async () => {
+    const v = campo.value.trim();
+    if(!v) return caixa.innerHTML = '';
+    try {
+      const r = await q(sb.rpc('buscar_cid10', { p_termo: v, p_limite: 1 }));
+      const exato = r.find(c => c.codigo.replace('.', '').toUpperCase() === v.replace('.', '').toUpperCase());
+      caixa.innerHTML = exato
+        ? `<p class="cid-ok">${h(exato.codigo)} — ${h(exato.descricao)}</p>`
+        : `<p class="cid-nao">Código não encontrado na CID-10. Confira no pedido médico.</p>`;
+    } catch { caixa.innerHTML = ''; }
+  };
+
+  const sugerir = async () => {
+    const termo = campo.value.trim();
+    if(termo.length < 2) return caixa.innerHTML = '';
+    let lista;
+    try { lista = await q(sb.rpc('buscar_cid10', { p_termo: termo, p_limite: 8 })); }
+    catch { return caixa.innerHTML = ''; }
+    if(!lista.length) return descrever();
+    caixa.innerHTML = `<ul class="cid-sug">${lista.map(c =>
+      `<li><button type="button" data-cid="${h(c.codigo)}"><b>${h(c.codigo)}</b> ${h(c.descricao)}</button></li>`).join('')}</ul>`;
+    $$('button[data-cid]', caixa).forEach(b => b.onclick = () => {
+      campo.value = b.dataset.cid;
+      campo.dispatchEvent(new Event('change', { bubbles:true }));
+      descrever();
+      campo.focus();
+    });
+  };
+
+  campo.addEventListener('input', debounce(sugerir, 300));
+  campo.addEventListener('blur', () => setTimeout(descrever, 180));
+  if(campo.value.trim()) descrever();
+}
+
+/* =====================================================================
+   ANEXOS — pedido médico e exames
+   ---------------------------------------------------------------------
+   O arquivo vai para um bucket PRIVADO do Storage; a leitura é sempre por
+   URL assinada de validade curta. O acesso é decidido pelo RLS da
+   solicitação, não pelo cliente — ver a migração 006.
+
+   Foto de pedido tirada com celular passa de 3 MB, e o plano de
+   armazenamento do município é limitado, então imagem é reduzida no
+   navegador antes de subir. PDF vai como está: recomprimir PDF no cliente
+   arrisca perder legibilidade de exame.
+   ===================================================================== */
+const ANEXO_TIPOS = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/heic'];
+const ANEXO_MAX_MB = 8;        // antes da redução
+const ANEXO_MAX_POR_SOL = 5;
+const DOCUMENTOS = { pedido:'Pedido / encaminhamento', exame:'Exame ou laudo', outro:'Outro documento' };
+
+const tamanhoLegivel = b => b >= 1048576 ? (b / 1048576).toFixed(1).replace('.', ',') + ' MB'
+                          : Math.max(1, Math.round(b / 1024)) + ' KB';
+
+/** Reduz imagem para no máximo 1600px e recomprime em JPEG. PDF passa direto. */
+async function comprimirImagem(arquivo, maxLado = 1600, qualidade = 0.75){
+  if(!arquivo.type.startsWith('image/')) return arquivo;
+  let bitmap;
+  try { bitmap = await createImageBitmap(arquivo); }
+  catch { return arquivo; }                      // formato que o navegador não abre: sobe como está
+  const escala = Math.min(1, maxLado / Math.max(bitmap.width, bitmap.height));
+  const tela = document.createElement('canvas');
+  tela.width = Math.round(bitmap.width * escala);
+  tela.height = Math.round(bitmap.height * escala);
+  tela.getContext('2d').drawImage(bitmap, 0, 0, tela.width, tela.height);
+  bitmap.close?.();
+  const blob = await new Promise(r => tela.toBlob(r, 'image/jpeg', qualidade));
+  if(!blob || blob.size >= arquivo.size) return arquivo;    // não piorar o que já estava bom
+  return new File([blob], arquivo.name.replace(/\.[^.]+$/, '') + '.jpg', { type:'image/jpeg' });
+}
+
+function validarAnexo(arquivo){
+  if(!ANEXO_TIPOS.includes(arquivo.type)) return 'Envie PDF ou imagem (JPG, PNG).';
+  if(arquivo.size > ANEXO_MAX_MB * 1048576) return `Arquivo acima de ${ANEXO_MAX_MB} MB.`;
+  return null;
+}
+
+/** Sobe os arquivos e registra cada um. Devolve quantos falharam. */
+async function enviarAnexos(solicitacaoIds, itens){
+  if(!itens.length || !solicitacaoIds.length) return { enviados:0, falhas:[] };
+  let enviados = 0; const falhas = [];
+  for(const it of itens){
+    const arquivo = await comprimirImagem(it.arquivo);
+    const ext = (arquivo.name.match(/\.([A-Za-z0-9]+)$/) || [, 'bin'])[1].toLowerCase();
+    for(const sid of solicitacaoIds){
+      /* O mesmo documento vale para todos os procedimentos pedidos na mesma
+         consulta, então ele é anexado a cada solicitação gerada. */
+      const caminho = `${sid}/${crypto.randomUUID()}.${ext}`;
+      try {
+        const { error } = await sb.storage.from('anexos')
+          .upload(caminho, arquivo, { contentType: arquivo.type, upsert:false });
+        if(error) throw error;
+        await q(sb.from('anexos').insert({
+          solicitacao_id: sid, caminho, nome_original: it.arquivo.name,
+          tipo: arquivo.type, tamanho: arquivo.size, documento: it.documento }));
+        enviados++;
+      } catch(e){
+        falhas.push(it.arquivo.name);
+        registrarErro(e, 'enviarAnexos');
+      }
+    }
+  }
+  return { enviados, falhas };
+}
+
+/** Abre o anexo numa aba nova, por URL assinada de validade curta. */
+async function abrirAnexo(a){
+  registrarAcesso(a.paciente_id, 'abertura de anexo');
+  const { data, error } = await sb.storage.from('anexos').createSignedUrl(a.caminho, 120);
+  if(error || !data?.signedUrl){
+    toast('Não foi possível abrir o arquivo. Tente de novo.', 'err');
+    return registrarErro(error || new Error('sem URL'), 'abrirAnexo');
+  }
+  window.open(data.signedUrl, '_blank', 'noopener');
+}
+
+/** Lista de anexos de uma solicitação, com botão de abrir. */
+function listaAnexos(lista, id = uid('ax')){
+  if(!lista.length){
+    return alerta('warn', 'Nenhum documento anexado. O regulador vai analisar sem ver o pedido médico.', 'Sem anexo');
+  }
+  return `<ul class="anexos" id="${id}">${lista.map(a => `<li>
+    <span class="ic" aria-hidden="true">${a.tipo === 'application/pdf' ? 'PDF' : 'IMG'}</span>
+    <span class="nm"><b>${h(a.nome_original)}</b>
+      <small>${h(DOCUMENTOS[a.documento] || a.documento)} · ${h(tamanhoLegivel(a.tamanho))} · ${fmtDataHora(a.created_at)}</small></span>
+    <button type="button" class="btn sm" data-abrir="${a.id}">Abrir</button></li>`).join('')}</ul>`;
+}
+
+function ligarAnexos(root, lista){
+  $$('[data-abrir]', root).forEach(b => b.onclick = () => {
+    const a = lista.find(x => String(x.id) === b.dataset.abrir);
+    if(a) abrirAnexo(a);
+  });
+}
+
 /* ---------------- etiquetas ---------------- */
 const badgePrio = (p, longo) => p ? `<span class="badge pr-${p}"><span class="s" aria-hidden="true">${PRIORIDADES[p].s}</span>${h(PRIORIDADES[p].l)}${longo ? ' — ' + h(PRIORIDADES[p].d) : ''}</span>` : '';
 function chaveStatus(x){
@@ -164,6 +316,13 @@ function esperaDupla(s){
 const tagReg = () => `<span class="tag" title="Este procedimento passa pela análise regulatória antes do agendamento">Exige regulação</span>`;
 const nomeUnidade = id => S.unidades.find(u => u.id === id)?.nome || '—';
 const nomeProc = id => S.procedimentos.find(p => p.id === id)?.nome || '—';
+const CONSELHOS = { CRM:'CRM', COREN:'COREN', CRO:'CRO', CREFITO:'CREFITO', CRP:'CRP', CRN:'CRN', CRFa:'CRFa', CRF:'CRF', OUTRO:'Outro' };
+/* "Dr. Fulano — CRM-GO 12345 · Cardiologia": o registro no conselho é o que
+   distingue dois profissionais de mesmo nome. */
+const rotuloProf = p => !p ? '—' : p.nome
+  + (p.numero_conselho ? ` — ${p.conselho}${p.uf_conselho ? '-' + p.uf_conselho : ''} ${p.numero_conselho}` : '')
+  + (p.especialidade ? ` · ${p.especialidade}` : '');
+const profsAtivos = () => S.profissionais.filter(p => p.ativo);
 const procExige = id => !!S.procedimentos.find(p => p.id === id)?.exige_regulacao;
 const papel = () => S.perfil?.papel;
 const can = (...p) => p.includes(papel());
@@ -567,13 +726,24 @@ async function entrar(perfil){
 const REFS_VALIDADE_MS = 5 * 60 * 1000;
 let refsEm = 0;
 
+/* Leitura que pode falhar sem derrubar a tela.
+   O código e as migrações não sobem no mesmo instante: entre o deploy e a
+   aplicação do SQL no painel do Supabase existe uma janela em que a tabela
+   ainda não existe. Sem isto, carregarRefs estoura e NINGUÉM entra no
+   sistema — tela nova indisponível é incômodo, login quebrado é parada. */
+async function opcional(promessa, onde){
+  try { return await q(promessa); }
+  catch(e){ registrarErro(e, 'opcional:' + onde); return []; }
+}
+
 async function carregarRefs(){
-  const [u, p, up] = await Promise.all([
+  const [u, p, up, pf] = await Promise.all([
     q(sb.from('unidades').select('*').order('nome')),
     carregarProcedimentos(),
-    q(sb.from('unidade_procedimentos').select('*'))
+    q(sb.from('unidade_procedimentos').select('*')),
+    opcional(sb.from('profissionais').select('*').order('nome'), 'profissionais'),
   ]);
-  S.unidades = u; S.procedimentos = p; S.unProc = up;
+  S.unidades = u; S.procedimentos = p; S.unProc = up; S.profissionais = pf;
   refsEm = Date.now();
 }
 /* Assinatura barata: pega inclusão, exclusão e troca de situação. Uma
@@ -582,6 +752,7 @@ const assinaturaRefs = () => [
   S.unidades.length, S.unidades.filter(u => u.ativo).length,
   S.procedimentos.length, S.procedimentos.filter(p => p.ativo).length,
   S.unProc.length,
+  S.profissionais.length, S.profissionais.filter(p => p.ativo).length,
 ].join('|');
 
 async function recarregarRefs(){
@@ -731,6 +902,7 @@ const ROTAS = {
   agendas:      { t:'Agendas e vagas',            ic:'agendas',       g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgAgendas },
   locais:       { t:'Locais e unidades',          ic:'locais',        g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgLocais },
   procedimentos:{ t:'Procedimentos',              ic:'procedimentos', g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgProcedimentos },
+  profissionais:{ t:'Profissionais',              ic:'usuarios',      g:'Administração',  papeis:['admin','agendador','regulador'],               r:() => pgProfissionais },
   pacientes:    { t:'Pacientes',                  ic:'pacientes',     g:'Administração',  papeis:['admin','solicitante','agendador','regulador'], r:() => pgPacientes },
   usuarios:     { t:'Usuários',                   ic:'usuarios',      g:'Administração',  papeis:['admin'],                                       r:() => pgUsuarios },
   mira:         { t:'Envio ao Ministério (MIRA)', ic:'relatorios',    g:'Administração',  papeis:['admin','regulador'],                           r:() => pgMira },
@@ -1168,7 +1340,7 @@ async function pgSolicitacao(el){
     el.innerHTML = estado({ tipo:'permissao', titulo:'Usuário sem unidade', texto:'Para registrar solicitações, seu usuário precisa estar vinculado a uma unidade. Peça ao administrador para fazer o vínculo em Usuários.' });
     return;
   }
-  const novoW = () => ({ etapa:1, max:1, pac:null, origem:S.perfil.unidade_id || '', data_pedido:fmtData(hojeISO()), profissional:'', crm:'', cid10:'',
+  const novoW = () => ({ etapa:1, max:1, pac:null, anexos:[], origem:S.perfil.unidade_id || '', data_pedido:fmtData(hojeISO()), profissional:'', crm:'', cid10:'',
     registro:'', itens:[], prioridade:'azul', justificativa:'' });
   let W = novoW(), abertas = [];
   const rasc = store.get(chaveRascunho());
@@ -1272,14 +1444,62 @@ async function pgSolicitacao(el){
     { name:'origem', label:'Unidade ou serviço que emitiu o pedido', type:'select', required:true, num:true, span:2,
       options: S.unidades.filter(u => u.ativo).map(u => ({ value:u.id, label:u.nome })), dica:'Onde o médico atendeu o paciente.' },
     { name:'data_pedido', label:'Data do pedido médico', required:true, mask:'data', dica:'dd/mm/aaaa, como está no pedido' },
-    { name:'cid10', label:'CID-10', dica:'Ex.: I10 ou M54.5', attrs:'maxlength="6" style="text-transform:uppercase"' },
+    { name:'cid10', label:'CID-10', span:2, dica:'Digite o código ou parte do nome da doença. Ex.: I10, ou "hipertensão".',
+      attrs:'maxlength="60" autocomplete="off"' },
     { name:'profissional', label:'Profissional solicitante', required:true, span:2, dica:'Nome do médico(a) que assinou o pedido' },
     { name:'crm', label:'CRM ou registro', dica:'Ex.: CRM-GO 12345' },
     ...(!S.perfil.unidade_id ? [{ name:'registro', label:'Unidade de registro', type:'select', required:true, num:true,
       options: S.unidades.filter(u => u.ativo && u.tipo !== 'executante').map(u => ({ value:u.id, label:u.nome })), dica:'Unidade onde a solicitação está sendo registrada.' }] : []),
   ];
-  function etapa2(){ return formHtml(F_PEDIDO(), { origem:W.origem, data_pedido:W.data_pedido, cid10:W.cid10, profissional:W.profissional, crm:W.crm, registro:W.registro }, 'sw'); }
-  function liga2(c){ $$('input,select', c).forEach(i => i.addEventListener('change', () => { coletar(c); salvarRascunho(); })); }
+  function etapa2(){
+    return formHtml(F_PEDIDO(), { origem:W.origem, data_pedido:W.data_pedido, cid10:W.cid10, profissional:W.profissional, crm:W.crm, registro:W.registro }, 'sw')
+      + `<div class="secao-t">Documentos</div>
+         <p class="muted" style="margin-top:0;font-size:13px">Anexe o pedido ou encaminhamento do médico, e os exames que o
+           regulador precisa ver. Sem isso ele analisa sem o documento, e o papel continua tendo que ir até a central.
+           Foto de celular é reduzida automaticamente antes de subir.</p>
+         <div class="field">
+           <label for="sw-arq" class="btn" style="width:max-content">Escolher arquivo</label>
+           <input type="file" id="sw-arq" accept=".pdf,.jpg,.jpeg,.png,.webp,image/*,application/pdf" multiple class="sr-only">
+           <span class="dica">PDF ou imagem, até ${ANEXO_MAX_MB} MB cada, no máximo ${ANEXO_MAX_POR_SOL} documentos.</span>
+           <p class="erro-msg hidden" id="sw-arq-e"></p>
+         </div>
+         <div id="sw-anexos"></div>`;
+  }
+
+  function renderAnexosEscolhidos(){
+    const box = $('#sw-anexos');
+    if(!box) return;
+    if(!W.anexos.length){ box.innerHTML = ''; return; }
+    box.innerHTML = `<ul class="anexos">${W.anexos.map((a, i) => `<li>
+      <span class="ic" aria-hidden="true">${a.arquivo.type === 'application/pdf' ? 'PDF' : 'IMG'}</span>
+      <span class="nm"><b>${h(a.arquivo.name)}</b><small>${h(tamanhoLegivel(a.arquivo.size))}</small></span>
+      <select data-doc="${i}" aria-label="Tipo do documento ${h(a.arquivo.name)}">
+        ${Object.entries(DOCUMENTOS).map(([v, l]) => `<option value="${v}" ${v === a.documento ? 'selected' : ''}>${h(l)}</option>`).join('')}
+      </select>
+      <button type="button" class="btn sm err-sec" data-rm="${i}">Remover</button></li>`).join('')}</ul>`;
+    $$('[data-rm]', box).forEach(b => b.onclick = () => { W.anexos.splice(+b.dataset.rm, 1); renderAnexosEscolhidos(); });
+    $$('[data-doc]', box).forEach(sl => sl.onchange = () => { W.anexos[+sl.dataset.doc].documento = sl.value; });
+  }
+  function liga2(c){
+    $$('input,select', c).forEach(i => i.addEventListener('change', () => { coletar(c); salvarRascunho(); }));
+    ligarBuscaCID(c, 'sw-cid10');
+
+    const arq = $('#sw-arq', c), erro = $('#sw-arq-e', c);
+    if(arq) arq.onchange = () => {
+      const problemas = [];
+      for(const f of arq.files){
+        if(W.anexos.length >= ANEXO_MAX_POR_SOL){ problemas.push(`Máximo de ${ANEXO_MAX_POR_SOL} documentos.`); break; }
+        const msg = validarAnexo(f);
+        if(msg) problemas.push(`${f.name}: ${msg}`);
+        else W.anexos.push({ arquivo:f, documento: W.anexos.length ? 'exame' : 'pedido' });
+      }
+      arq.value = '';                       // permite reescolher o mesmo arquivo
+      erro.textContent = problemas.join(' ');
+      erro.classList.toggle('hidden', !problemas.length);
+      renderAnexosEscolhidos();
+    };
+    renderAnexosEscolhidos();
+  }
 
   /* ---------- Etapa 3: procedimentos ---------- */
   function etapa3(){
@@ -1395,6 +1615,11 @@ async function pgSolicitacao(el){
       cid10:(W.cid10 || '').replace('.', '') || null, prioridade:W.prioridade, justificativa:W.justificativa || null };
     try {
       const criadas = await q(sb.from('solicitacoes').insert(W.itens.map(pid => ({ ...base, procedimento_id:pid }))).select('id,protocolo,procedimento_id'));
+      /* Os anexos sobem DEPOIS do registro, porque o caminho no bucket é
+         derivado do id da solicitação e é dele que sai a regra de acesso.
+         Falha aqui não desfaz o registro: a solicitação existe e o
+         documento pode ser anexado de novo pelo detalhe dela. */
+      const envio = await enviarAnexos(criadas.map(c => c.id), W.anexos);
       excluirRascunho(); atualizarContadores();
       const pac = W.pac, agendaveis = criadas.filter(c => !procExige(c.procedimento_id));
       el.innerHTML = `<section class="card" aria-labelledby="ok-t">
@@ -1404,6 +1629,8 @@ async function pgSolicitacao(el){
           ${criadas.map(c => `<tr><td data-label="Protocolo"><b>${h(c.protocolo)}</b></td><td data-label="Procedimento">${h(nomeProc(c.procedimento_id))}</td>
             <td data-label="Próximo passo">${procExige(c.procedimento_id) ? `${badgeSt('regulacao')} <span class="sub-linha">O regulador vai analisar; a unidade acompanha em Solicitações.</span>` : `${badgeSt('pendente')} <span class="sub-linha">Pode ser agendado agora.</span>`}</td></tr>`).join('')}
         </tbody></table></div>
+        ${envio.falhas.length ? alerta('err', `Não foi possível anexar: <b>${h([...new Set(envio.falhas)].join(', '))}</b>. A solicitação foi registrada; abra o detalhe dela para anexar de novo.`, 'Anexo não enviado') : ''}
+        ${envio.enviados ? `<p class="muted" style="margin-top:10px">${num(envio.enviados)} documento(s) anexado(s).</p>` : ''}
         <p class="muted" style="margin-top:10px">Informe os números de protocolo ao paciente para acompanhamento.</p>
         <div class="acoes" style="margin-top:12px">
           ${agendaveis.length && pode('agendamento') ? `<a class="btn pri lg" href="#/agendamento?pac=${pac.id}">Agendar agora ›</a>` : ''}
@@ -1540,10 +1767,12 @@ async function pgSolicitacoes(el){
    ===================================================================== */
 async function abrirSolicitacao(id, depois){
   // registrado assim que se sabe o paciente, logo após carregar (abaixo)
-  const [s, hist] = await Promise.all([
+  const [s, hist, anexos] = await Promise.all([
     q(sb.from('vw_solicitacoes').select('*').eq('id', id).single()),
-    q(sb.from('historico').select('*, perfis(nome)').eq('solicitacao_id', id).order('created_at'))
+    q(sb.from('historico').select('*, perfis(nome)').eq('solicitacao_id', id).order('created_at')),
+    opcional(sb.from('anexos').select('*').eq('solicitacao_id', id).order('created_at'), 'anexos'),
   ]);
+  anexos.forEach(a => a.paciente_id = s.paciente_id);
   registrarAcesso(s.paciente_id, 'detalhe da solicitação');
   const minhaUnidade = s.unidade_solicitante_id === S.perfil.unidade_id;
   const central = can('admin','regulador','agendador');
@@ -1601,6 +1830,7 @@ async function abrirSolicitacao(id, depois){
         <div><dt>Registrada em</dt><dd>${h(s.unidade_solicitante_nome)}</dd></div>
       </dl>
       <div class="field"><span class="lbl">Justificativa clínica</span>${s.justificativa ? `<div class="box">${h(s.justificativa)}</div>` : '<p class="muted">Não informada.</p>'}</div>
+      <div class="field"><span class="lbl">Documentos anexados</span>${listaAnexos(anexos, 'det-anexos')}</div>
       ${s.data_regulacao ? `<h3 class="secao-t">Regulação</h3><dl class="dl"><div><dt>Regulador</dt><dd>${h(s.regulador_nome || '—')}</dd></div><div><dt>Data</dt><dd>${fmtDataHora(s.data_regulacao)}</dd></div>
         ${s.parecer ? `<div style="grid-column:1/-1"><dt>Parecer</dt><dd>${h(s.parecer)}</dd></div>` : ''}</dl>` : ''}
       ${s.vaga_data ? `<h3 class="secao-t">Agendamento</h3>
@@ -1612,6 +1842,7 @@ async function abrirSolicitacao(id, depois){
         ${x.observacao ? `<div>${h(x.observacao)}</div>` : ''}</li>`).join('')}</ol>`
   });
   const vf = $('#ver-ficha', m); if(vf) vf.onclick = () => { m.close(); fichaPaciente(s.paciente_id, 'historico'); };
+  ligarAnexos(m, anexos);
 }
 
 /* Cancelar: explica o efeito e exige motivo */
@@ -1685,7 +1916,11 @@ async function pgRegulacao(el){
     sel = s;
     $$('#rg-fila .it').forEach(b => b.setAttribute('aria-selected', +b.dataset.id === s.id));
     const det = $('#rg-det');
-    const hist = await q(sb.from('historico').select('*, perfis(nome)').eq('solicitacao_id', s.id).order('created_at'));
+    const [hist, anexos] = await Promise.all([
+      q(sb.from('historico').select('*, perfis(nome)').eq('solicitacao_id', s.id).order('created_at')),
+      opcional(sb.from('anexos').select('*').eq('solicitacao_id', s.id).order('created_at'), 'anexos'),
+    ]);
+    anexos.forEach(a => a.paciente_id = s.paciente_id);
     const pend = pendencias(s), analisavel = s.status === 'pendente';
     const crit = CRITERIOS_RISCO[s.prioridade] || [];
     det.innerHTML = `
@@ -1704,6 +1939,7 @@ async function pgRegulacao(el){
         <div><dt>Solicitante</dt><dd>${h(s.profissional_solicitante || '—')} ${h(s.crm_solicitante || '')}</dd></div>
       </dl>
       <div class="field"><span class="lbl">Justificativa clínica</span>${s.justificativa ? `<div class="box">${h(s.justificativa)}</div>` : '<p class="muted">Não informada.</p>'}</div>
+      <div class="field"><span class="lbl">Documentos anexados</span>${listaAnexos(anexos, 'reg-anexos')}</div>
       <h3 class="secao-t">Paciente</h3>
       <dl class="dl"><div><dt>Idade</dt><dd>${idade(s.paciente_nascimento)} anos (${fmtData(s.paciente_nascimento)})</dd></div>
         <div><dt>Sexo</dt><dd>${{F:'Feminino',M:'Masculino',I:'Não informado'}[s.paciente_sexo] || '—'}</dd></div>
@@ -1731,6 +1967,7 @@ async function pgRegulacao(el){
         </div>` : `<div class="acoes"><button type="button" class="btn" id="rg-abrir">Abrir detalhes completos</button>
           ${casaStatus(s, 'agendar') && pode('agendamento') ? `<a class="btn pri" href="#/agendamento?sol=${s.id}&pac=${s.paciente_id}">Agendar ›</a>` : ''}</div>`}`;
     $('#rg-abrir', det).onclick = () => abrirSolicitacao(s.id, async () => { await carregar(); filtrar(); });
+    ligarAnexos(det, anexos);
     $$('[data-acao]', det).forEach(b => b.onclick = () => acao(b.dataset.acao, s, b));
     if(rolar && matchMedia('(max-width:1100px)').matches) det.scrollIntoView({ behavior:'smooth', block:'start' });
   }
@@ -2396,8 +2633,12 @@ function gerarVagas(execs, depois, pre={}){
       <div class="grid">
         <div class="field s2"><label for="g-uni">Local de atendimento *</label><select id="g-uni">${optList(execs, pre.unidade || execs[0].id)}</select></div>
         <div class="field s2"><label for="g-proc">Procedimento *</label><select id="g-proc"></select></div>
-        <div class="field full"><label for="g-prof">Profissional</label><input id="g-prof" list="g-dl-prof" value="${h(pre.prof || '')}" placeholder="Ex.: Dr. Fulano de Tal — CRM-GO 0000">
-          <datalist id="g-dl-prof">${(S.profs || []).map(p => `<option value="${h(p)}">`).join('')}</datalist></div>
+        <div class="field full"><label for="g-prof">Profissional</label>
+          <select id="g-prof">
+            <option value="">Sem profissional definido</option>
+            ${profsAtivos().map(p => `<option value="${p.id}" ${String(p.id) === String(pre.prof || '') ? 'selected' : ''}>${h(rotuloProf(p))}</option>`).join('')}
+          </select>
+          ${profsAtivos().length ? '' : `<span class="dica">Nenhum profissional cadastrado ainda. Cadastre em <b>Administração → Profissionais</b> para a agenda sair com o nome certo na guia.</span>`}</div>
       </div>
       <div class="sec-t">Quando o profissional atende?</div>
       <div class="seg" id="g-modo" role="group" aria-label="Forma de repetição">
@@ -2422,9 +2663,10 @@ function gerarVagas(execs, depois, pre={}){
           + `<optgroup label="${ja.length ? 'Outros procedimentos' : 'Procedimentos'}">${optList(outros)}</optgroup>`;
       };
       const carregarExist = async () => {
-        const u = +$m('#g-uni').value, p = +$m('#g-proc').value, prof = $m('#g-prof').value.trim() || null;
-        const l = await fetchAll(() => sb.from('vagas').select('data,profissional').eq('unidade_executante_id', u).eq('procedimento_id', p).gte('data', hoje).order('id'), 20000);
-        st.existentes = new Set(l.filter(v => (v.profissional || null) === prof).map(v => v.data));
+        const u = +$m('#g-uni').value, p = +$m('#g-proc').value;
+        const prof = $m('#g-prof').value ? +$m('#g-prof').value : null;
+        const l = await fetchAll(() => sb.from('vagas').select('data,profissional_id').eq('unidade_executante_id', u).eq('procedimento_id', p).gte('data', hoje).order('id'), 20000);
+        st.existentes = new Set(l.filter(v => (v.profissional_id ?? null) === prof).map(v => v.data));
         if(st.modo === 'avulsas') renderQuando(); else prev();
       };
 
@@ -2591,7 +2833,7 @@ function gerarVagas(execs, depois, pre={}){
       $m('#g-fer').onchange = prev;
       $m('#g-uni').onchange = () => { atualizaProcs(); carregarExist(); };
       $m('#g-proc').onchange = carregarExist;
-      $m('#g-prof').oninput = debounce(carregarExist, 400);
+      $m('#g-prof').onchange = carregarExist;
       st.prev = prev; st.calcular = calcular;
       atualizaProcs(); renderTurnos(); renderQuando(); carregarExist();
     },
@@ -2602,7 +2844,8 @@ function gerarVagas(execs, depois, pre={}){
       const faixas = st.turnos.map(t => [minutos(t.ini), t.tipo === 'chegada' ? minutos(t.ini) + 1 : minutos(t.fim)]).sort((a, b) => a[0] - b[0]);
       for(let i = 1; i < faixas.length; i++) if(faixas[i][0] < faixas[i-1][1]) throw new Error('Os turnos estão com horários sobrepostos.');
       const res = await q(sb.rpc('gerar_vagas', {
-        p_unidade: +$('#g-uni', m).value, p_procedimento: +$('#g-proc', m).value, p_profissional: $('#g-prof', m).value,
+        p_unidade: +$('#g-uni', m).value, p_procedimento: +$('#g-proc', m).value,
+        p_profissional: $('#g-prof', m).value ? +$('#g-prof', m).value : null,
         p_datas: r.validas,
         p_turnos: st.turnos.map(t => ({ hora_ini:t.ini, hora_fim:t.tipo === 'chegada' ? t.ini : t.fim, intervalo:t.tipo === 'chegada' ? 0 : +t.int, qtd:+t.qtd }))
       }));
@@ -2882,6 +3125,44 @@ function pgVulnerabilidade(el){
     colunas:[
       { l:'Critério', f:d => `<b>${h(d.nome)}</b>${d.descricao ? `<small>${h(d.descricao)}</small>` : ''}`, v:d => d.nome },
       { l:'Peso', n:true, f:d => num(d.peso), v:d => d.peso } ] });
+}
+
+function pgProfissionais(el){
+  el.innerHTML = alerta('info',
+    'Profissionais que <b>atendem</b> — os que aparecem nas agendas e na guia do paciente. '
+    + 'O médico que <b>assina o pedido</b> continua sendo digitado na solicitação, sem cadastro prévio: '
+    + 'ele costuma ser de fora da rede e exigir cadastro travaria a recepção.<br><br>'
+    + 'O <b>CBO</b> é o que o MIRA pede como especialidade do executante, e é obrigatório para '
+    + 'procedimentos dos grupos 03 e 04 da SIGTAP. Sem ele, o registro vai para o Ministério incompleto.',
+    'Quem entra aqui') + '<div id="crud"></div>';
+
+  return crud({ el: $('#crud', el), tabela:'profissionais', titulo:'profissional', artigo:'o',
+    efeitoDesativar:'Deixa de aparecer na criação de novas agendas; as vagas já geradas continuam com o nome dele.',
+    campos:[
+      { name:'nome', label:'Nome', required:true, span:2 },
+      { name:'especialidade', label:'Especialidade', span:2, dica:'Como aparece para o paciente. Ex.: Cardiologia' },
+      { name:'conselho', label:'Conselho', type:'select', required:true, empty:false, options: opts(CONSELHOS) },
+      { name:'numero_conselho', label:'Número no conselho', dica:'Só os números, sem o UF' },
+      { name:'uf_conselho', label:'UF do conselho', type:'select', options: UFS.map(u => ({ value:u, label:u })) },
+      { name:'cbo', label:'CBO', attrs:'inputmode="numeric" maxlength="6"', dica:'6 números. Ex.: 225120 para cardiologista' },
+      { name:'unidade_id', label:'Local principal', type:'select', span:2,
+        options: locaisExec().map(u => ({ value:u.id, label:u.nome })),
+        dica:'Opcional. Serve de referência; não impede agenda em outro local.' },
+      { name:'ativo', label:'Situação', type:'checkbox', text:'Ativo' },
+    ],
+    validar:(o, err) => {
+      if(o.cbo && !/^\d{6}$/.test(o.cbo)) err('cbo', 'O CBO tem 6 números.');
+      if(o.numero_conselho && !/^\d{1,10}$/.test(dig(o.numero_conselho))) err('numero_conselho', 'Informe só os números do registro.');
+      if(o.numero_conselho && !o.uf_conselho) err('uf_conselho', 'Informe a UF do conselho junto com o número.');
+    },
+    colunas:[
+      { l:'Profissional', f:d => `<b>${h(d.nome)}</b>${d.especialidade ? `<small>${h(d.especialidade)}</small>` : ''}`, v:d => d.nome },
+      { l:'Conselho', f:d => d.numero_conselho
+          ? `${h(d.conselho)}${d.uf_conselho ? '-' + h(d.uf_conselho) : ''} ${h(d.numero_conselho)}`
+          : '<span class="tag inc">sem registro</span>', v:d => (d.numero_conselho || '') },
+      { l:'CBO', f:d => d.cbo ? h(d.cbo) : '<span class="tag inc">sem CBO</span>', v:d => d.cbo || '' },
+      { l:'Local principal', f:d => d.unidade_id ? h(nomeUnidade(d.unidade_id)) : '<span class="muted">—</span>', v:d => d.unidade_id || 0 },
+    ] });
 }
 
 function pgProcedimentos(el){
