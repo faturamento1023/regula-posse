@@ -1,0 +1,85 @@
+name: Verificações
+
+# Roda em todo push e em todo pull request. São segundos de execução e
+# pegam, antes de chegar ao banco de um município, as três coisas que mais
+# doem: erro de sintaxe no SQL, função pura quebrada e script inline
+# reintroduzido (que o Content-Security-Policy bloquearia em produção).
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  testes:
+    name: Testes e verificadores
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Testes das funções puras e carga do módulo
+        run: node --test "test/**/*.test.js"
+
+      - name: Verificar CSP, scripts inline e pureza de js/util.js
+        run: node ferramentas/verificar-csp.mjs
+
+      - name: Verificar que as migrações batem com schema.sql
+        run: node ferramentas/verificar-migracoes.mjs
+
+  banco:
+    name: Aplicar o schema num Postgres limpo
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+        ports: ['5432:5432']
+    env:
+      PGPASSWORD: ci
+      PSQL: psql -h localhost -U postgres -d ci -v ON_ERROR_STOP=1 -q
+    steps:
+      - uses: actions/checkout@v4
+
+      # O stub cria só o mínimo do ambiente Supabase (schema auth, auth.uid(),
+      # papéis anon e authenticated). Não é o Supabase: serve para o Postgres
+      # conseguir analisar e executar o schema.
+      - name: Arremedo do ambiente Supabase
+        run: $PSQL -f ferramentas/stub-supabase.sql
+
+      - name: Aplicar schema.sql
+        run: $PSQL -f banco-de-dados/schema.sql
+
+      - name: Aplicar schema.sql de novo (tem de ser idempotente)
+        run: $PSQL -f banco-de-dados/schema.sql
+
+      - name: Aplicar cada migração sobre o schema
+        run: |
+          for m in banco-de-dados/migracoes/*.sql; do
+            echo "-- $m"
+            $PSQL -f "$m"
+            $PSQL -f "$m"   # duas vezes: migração também é idempotente
+          done
+
+      - name: Conferir que as restrições de CPF e CNS barram documento inválido
+        run: |
+          $PSQL -c "insert into unidades (nome, tipo) values ('UBS CI', 'solicitante');"
+          # válidos passam
+          $PSQL -c "insert into pacientes (nome, cpf, data_nascimento, sexo) values ('Valido', '01234567890', '1980-01-01', 'M');"
+          $PSQL -c "insert into pacientes (nome, cns, data_nascimento, sexo) values ('CNS bom', '100000107160494', '1980-01-01', 'F');"
+          # inválidos têm de falhar
+          for sql in \
+            "insert into pacientes (nome, cpf, data_nascimento, sexo) values ('DV errado', '01234567891', '1980-01-01', 'M');" \
+            "insert into pacientes (nome, cpf, data_nascimento, sexo) values ('Mascarado', '012.345.678-90', '1980-01-01', 'M');" \
+            "insert into pacientes (nome, cns, data_nascimento, sexo) values ('CNS ruim', '100000107160495', '1980-01-01', 'F');" ; do
+            if $PSQL -c "$sql" 2>/dev/null; then
+              echo "ERRO: o banco aceitou documento inválido -> $sql"; exit 1
+            fi
+          done
+          echo "restrições funcionando"
