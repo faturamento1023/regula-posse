@@ -122,7 +122,10 @@ end $$;
 --  anexado, sem uma consulta por linha.
 -- ---------------------------------------------------------------------
 drop function if exists mira_lote(date, date);
-drop view if exists vw_solicitacoes cascade;
+-- Sem cascade de propósito: nada depende desta view hoje, e se um dia
+-- algo depender é melhor a migração falhar e avisar do que apagar em
+-- silêncio um objeto que alguém criou no banco do município.
+drop view if exists vw_solicitacoes;
 create view vw_solicitacoes with (security_invoker = true) as
 select
   s.*,
