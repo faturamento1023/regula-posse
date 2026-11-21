@@ -726,12 +726,22 @@ async function entrar(perfil){
 const REFS_VALIDADE_MS = 5 * 60 * 1000;
 let refsEm = 0;
 
+/* Leitura que pode falhar sem derrubar a tela.
+   O código e as migrações não sobem no mesmo instante: entre o deploy e a
+   aplicação do SQL no painel do Supabase existe uma janela em que a tabela
+   ainda não existe. Sem isto, carregarRefs estoura e NINGUÉM entra no
+   sistema — tela nova indisponível é incômodo, login quebrado é parada. */
+async function opcional(promessa, onde){
+  try { return await q(promessa); }
+  catch(e){ registrarErro(e, 'opcional:' + onde); return []; }
+}
+
 async function carregarRefs(){
   const [u, p, up, pf] = await Promise.all([
     q(sb.from('unidades').select('*').order('nome')),
     carregarProcedimentos(),
     q(sb.from('unidade_procedimentos').select('*')),
-    q(sb.from('profissionais').select('*').order('nome')),
+    opcional(sb.from('profissionais').select('*').order('nome'), 'profissionais'),
   ]);
   S.unidades = u; S.procedimentos = p; S.unProc = up; S.profissionais = pf;
   refsEm = Date.now();
@@ -1757,10 +1767,12 @@ async function pgSolicitacoes(el){
    ===================================================================== */
 async function abrirSolicitacao(id, depois){
   // registrado assim que se sabe o paciente, logo após carregar (abaixo)
-  const [s, hist] = await Promise.all([
+  const [s, hist, anexos] = await Promise.all([
     q(sb.from('vw_solicitacoes').select('*').eq('id', id).single()),
-    q(sb.from('historico').select('*, perfis(nome)').eq('solicitacao_id', id).order('created_at'))
+    q(sb.from('historico').select('*, perfis(nome)').eq('solicitacao_id', id).order('created_at')),
+    opcional(sb.from('anexos').select('*').eq('solicitacao_id', id).order('created_at'), 'anexos'),
   ]);
+  anexos.forEach(a => a.paciente_id = s.paciente_id);
   registrarAcesso(s.paciente_id, 'detalhe da solicitação');
   const minhaUnidade = s.unidade_solicitante_id === S.perfil.unidade_id;
   const central = can('admin','regulador','agendador');
@@ -1904,7 +1916,11 @@ async function pgRegulacao(el){
     sel = s;
     $$('#rg-fila .it').forEach(b => b.setAttribute('aria-selected', +b.dataset.id === s.id));
     const det = $('#rg-det');
-    const hist = await q(sb.from('historico').select('*, perfis(nome)').eq('solicitacao_id', s.id).order('created_at'));
+    const [hist, anexos] = await Promise.all([
+      q(sb.from('historico').select('*, perfis(nome)').eq('solicitacao_id', s.id).order('created_at')),
+      opcional(sb.from('anexos').select('*').eq('solicitacao_id', s.id).order('created_at'), 'anexos'),
+    ]);
+    anexos.forEach(a => a.paciente_id = s.paciente_id);
     const pend = pendencias(s), analisavel = s.status === 'pendente';
     const crit = CRITERIOS_RISCO[s.prioridade] || [];
     det.innerHTML = `
