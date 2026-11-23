@@ -335,6 +335,25 @@ const locaisDoProc = pid => { const ids = S.unProc.filter(x => x.procedimento_id
   const l = locaisExec().filter(u => ids.includes(u.id)); return l.length ? l : locaisExec(); };
 const procsDoLocal = uid => { const ids = S.unProc.filter(x => x.unidade_id === uid).map(x => x.procedimento_id);
   return S.procedimentos.filter(p => ids.includes(p.id)); };
+const ehLab = pid => !!S.procedimentos.find(p => p.id === pid)?.laboratorio;
+/* Uma guia de laboratório tem várias linhas — uma por exame. Nas listas de
+   atendimento ela é UMA guia: oito linhas iguais com o mesmo paciente e o
+   mesmo número seriam oito avisos para uma coleta só, e os totais do dia
+   contariam exames onde o laboratório conta pessoas. */
+/* Vaga de laboratório não tem hora: "24/11/2026 " com o espaço sobrando é
+   o tipo de detalhe que faz a tela parecer quebrada. */
+const fmtQuando = x => fmtData(x.vaga_data) + (x.vaga_hora ? ' ' + fmtHora(x.vaga_hora) : '');
+const agruparPorGuia = linhas => {
+  const m = new Map();
+  linhas.forEach(x => { const k = x.numero_guia || ('s' + x.id);
+    if(!m.has(k)) m.set(k, { ...x, itens:[] });
+    m.get(k).itens.push(x); });
+  return [...m.values()];
+};
+/* Locais que realizam pelo menos um exame de laboratório ativo. É onde faz
+   sentido abrir agenda por dia. */
+const locaisDeLab = () => { const ids = new Set(S.unProc.filter(x => ehLab(x.procedimento_id)).map(x => x.unidade_id));
+  return locaisExec().filter(u => ids.has(u.id)); };
 const optList = (lista, sel, vazio) => (vazio != null ? `<option value="">${h(vazio)}</option>` : '') +
   lista.map(o => `<option value="${h(o.id)}" ${String(o.id)===String(sel)?'selected':''}>${h(o.nome)}${o.ativo===false?' (inativo)':''}</option>`).join('');
 const params = () => new URLSearchParams(location.hash.split('?')[1] || '');
@@ -1142,7 +1161,7 @@ async function painelExecutante(rows, hoje){
       ${kpi({ l:'Faltas hoje', v:dia.filter(s => s.status === 'faltou').length, s:'falta registrada', href:'#/confirmacao', c:'vermelho' })}
     </div>
     <section class="card"><div class="card-h"><h2>Agenda de hoje</h2><span class="sub">${dataExtenso(hoje)}</span><span class="spacer"></span><a class="btn sm" href="#/confirmacao">Abrir confirmação</a></div>
-      ${tabelaSimples([{ l:'Hora', f:s => `<b>${fmtHora(s.vaga_hora)}</b>` }, { l:'Guia', f:s => `<a href="#/confirmacao?guia=${h(s.numero_guia)}">${h(s.numero_guia)}</a>` },
+      ${tabelaSimples([{ l:'Hora', f:s => s.vaga_hora ? `<b>${fmtHora(s.vaga_hora)}</b>` : '<span class="muted">dia todo</span>' }, { l:'Guia', f:s => `<a href="#/confirmacao?guia=${h(s.numero_guia)}">${h(s.numero_guia)}</a>` },
         { l:'Paciente', f:s => h(s.paciente_nome) }, { l:'Procedimento', f:s => h(s.procedimento_nome) }, { l:'Situação', f:badgeSt }], dia, 'Nenhum atendimento marcado para hoje.')}</section>`;
 }
 
@@ -1321,7 +1340,7 @@ async function fichaPaciente(pacId, aba='dados'){
         ${lst.length ? `<div class="tbl-wrap"><table class="resp"><thead><tr><th>Protocolo</th><th>Procedimento</th><th>Situação</th><th>Agendamento</th></tr></thead><tbody>
           ${lst.map(s => `<tr class="clicavel" tabindex="0" data-id="${s.id}"><td data-label="Protocolo"><b>${h(s.protocolo)}</b><small>${fmtData(s.created_at)}</small></td>
             <td data-label="Procedimento">${h(s.procedimento_nome)}</td><td data-label="Situação">${badgeSt(s)}</td>
-            <td data-label="Agendamento">${s.vaga_data ? `${fmtData(s.vaga_data)} ${fmtHora(s.vaga_hora)}<small>${h(s.unidade_executante_nome)} · guia ${h(s.numero_guia)}</small>` : '—'}</td></tr>`).join('')}</tbody></table></div>`
+            <td data-label="Agendamento">${s.vaga_data ? `${fmtQuando(s)}<small>${h(s.unidade_executante_nome)} · guia ${h(s.numero_guia)}</small>` : '—'}</td></tr>`).join('')}</tbody></table></div>`
           : estado({ titulo:'Nenhuma solicitação para este paciente' })}
       </div>`,
     actions:[ ...(pode('pacientes') || pode('solicitacao') ? [{ label:'Editar cadastro', onClick: () => { abrirPaciente(p, () => fichaPaciente(p.id)); } }] : []), { label:'Fechar', cls:'pri' }] });
@@ -1744,7 +1763,7 @@ const COLS_SOL = {
       s.dias_desde_pedido != null && s.dias_desde_pedido !== s.dias_espera
         ? `<small${s.dias_ate_insercao >= 7 ? ' class="atraso"' : ''}>${num(s.dias_desde_pedido)} desde o pedido</small>` : '') },
   situacao:{ l:'Situação', f:s => `${badgeSt(s)} ${['pendente','autorizada','devolvida'].includes(s.status) ? tagIncompleto(s) : ''}`, v:s => rotuloStatus(s) },
-  agenda:{ l:'Agendamento', f:s => s.vaga_data ? `${fmtData(s.vaga_data)} ${fmtHora(s.vaga_hora)}<small>${h(s.unidade_executante_nome)} · guia ${h(s.numero_guia)}</small>` : '—', v:s => s.vaga_data || '' },
+  agenda:{ l:'Agendamento', f:s => s.vaga_data ? `${fmtQuando(s)}<small>${h(s.unidade_executante_nome)} · guia ${h(s.numero_guia)}</small>` : '—', v:s => s.vaga_data || '' },
 };
 
 /* =====================================================================
@@ -1838,7 +1857,7 @@ async function abrirSolicitacao(id, depois){
       ${s.data_regulacao ? `<h3 class="secao-t">Regulação</h3><dl class="dl"><div><dt>Regulador</dt><dd>${h(s.regulador_nome || '—')}</dd></div><div><dt>Data</dt><dd>${fmtDataHora(s.data_regulacao)}</dd></div>
         ${s.parecer ? `<div style="grid-column:1/-1"><dt>Parecer</dt><dd>${h(s.parecer)}</dd></div>` : ''}</dl>` : ''}
       ${s.vaga_data ? `<h3 class="secao-t">Agendamento</h3>
-        <dl class="dl"><div><dt>Data e hora</dt><dd>${dataExtenso(s.vaga_data)} às ${fmtHora(s.vaga_hora)}</dd></div>
+        <dl class="dl"><div><dt>Data${s.vaga_hora ? ' e hora' : ''}</dt><dd>${dataExtenso(s.vaga_data)}${s.vaga_hora ? ` às ${fmtHora(s.vaga_hora)}` : ''}</dd></div>
         <div><dt>Local</dt><dd>${h(s.unidade_executante_nome)}</dd></div><div><dt>Profissional</dt><dd>${h(s.vaga_profissional || '—')}</dd></div>
         <div><dt>Guia</dt><dd>${h(s.numero_guia)}</dd></div></dl>` : ''}
       <h3 class="secao-t">Histórico</h3>
@@ -1870,7 +1889,7 @@ async function reverAutorizacao(s){
 async function cancelarSolicitacao(s){
   const r = await confirmar({ titulo:'Cancelar solicitação', botao:'Cancelar solicitação', cls:'err',
     html: `<p><b>${h(s.paciente_nome)}</b> — ${h(s.procedimento_nome)} (protocolo ${h(s.protocolo)})</p>
-      ${alerta('warn', `A solicitação sai da fila e não poderá ser reaberta.${s.vaga_id ? ` A vaga de <b>${fmtData(s.vaga_data)} às ${fmtHora(s.vaga_hora)}</b> será liberada para outro paciente.` : ''}`, 'O que acontece')}`,
+      ${alerta('warn', `A solicitação sai da fila e não poderá ser reaberta.${s.vaga_id ? ` A vaga de <b>${fmtQuando(s)}</b> será liberada para outro paciente.` : ''}`, 'O que acontece')}`,
     campo:{ label:'Motivo do cancelamento', obrigatorio:true, dica:'Ex.: paciente desistiu, já realizou em outro serviço, mudou de cidade.' } });
   if(!r.ok) return false;
   await q(sb.rpc('registrar_desfecho', { p_id:s.id, p_status:'cancelada', p_obs:r.texto }));
@@ -2091,7 +2110,7 @@ async function pgAgendamento(el){
     $('#ag-filtro-pac').innerHTML = P.get('pac') ? `<div class="alert info" style="margin-bottom:8px"><div>Mostrando apenas um paciente. <a href="#/agendamento">Ver a fila completa</a></div></div>` : '';
     $('#ag-fila').innerHTML = lista.length ? lista.map(s => `<button type="button" class="it" role="option" aria-selected="${sel?.id===s.id}" data-id="${s.id}">
         <span class="t1"><b>${h(s.paciente_nome)}</b>${badgePrio(s.prioridade)}</span><small>${h(s.procedimento_nome)}</small>
-        <small>${s.status === 'agendada' ? `Agendado ${fmtData(s.vaga_data)} ${fmtHora(s.vaga_hora)} · guia ${h(s.numero_guia)}` : `Protocolo ${h(s.protocolo)} · aguardando há ${s.dias_espera} dia(s)`}</small></button>`).join('')
+        <small>${s.status === 'agendada' ? `Agendado ${fmtQuando(s)} · guia ${h(s.numero_guia)}` : `Protocolo ${h(s.protocolo)} · aguardando há ${s.dias_espera} dia(s)`}</small></button>`).join('')
       : estado({ titulo: modo === 'espera' ? 'Ninguém aguardando agendamento' : 'Nenhum agendamento futuro', texto:'Ajuste os filtros ou a busca.' });
     $$('#ag-fila .it').forEach(b => b.onclick = () => selecionar(lista.find(s => s.id == b.dataset.id), true));
   };
@@ -2103,6 +2122,14 @@ async function pgAgendamento(el){
     $$('#ag-fila .it').forEach(b => b.setAttribute('aria-selected', +b.dataset.id === s.id));
     const locais = locaisDoProc(s.procedimento_id), rem = s.status === 'agendada';
     const box = $('#ag-dir');
+    /* Exame de laboratório não tem horário: o paciente é marcado para o dia
+       e leva todos os exames do pedido numa guia só. Caminho próprio, para
+       não transformar a tela de horários num emaranhado de exceções. */
+    if(s.procedimento_laboratorio){
+      painelLaboratorio(s, box);
+      if(rolar && matchMedia('(max-width:1100px)').matches) box.scrollIntoView({ behavior:'smooth', block:'start' });
+      return;
+    }
     box.innerHTML = `
       <div class="card-h"><h2>${rem ? 'Remarcar' : 'Agendar'}: ${h(s.procedimento_nome)}</h2><span class="spacer"></span>${badgePrio(s.prioridade)}</div>
       <h3 class="secao-t">Resumo da solicitação</h3>
@@ -2175,6 +2202,131 @@ async function pgAgendamento(el){
     if(rolar && matchMedia('(max-width:1100px)').matches) box.scrollIntoView({ behavior:'smooth', block:'start' });
   }
 
+  /* ---------- Laboratório: um dia, vários exames, uma guia ---------- */
+  function painelLaboratorio(s, box){
+    const rem = s.status === 'agendada';
+    /* Todos os exames de laboratório deste paciente que ainda podem entrar na
+       mesma coleta. O paciente chega com um pedido de oito; marcar um por um
+       produziria oito guias para a mesma picada de agulha. */
+    const doPac = rows.filter(x => x.paciente_id === s.paciente_id && x.procedimento_laboratorio
+      && (casaStatus(x, 'agendar') || x.id === s.id || (!!s.numero_guia && x.numero_guia === s.numero_guia)));
+    const marcados = new Set(doPac.map(x => x.id));
+    let locais = locaisDeLab();
+    if(!locais.length) locais = locaisExec();
+    let vagaSel = null, dias = [];
+
+    box.innerHTML = `
+      <div class="card-h"><h2>${rem ? 'Remarcar' : 'Agendar'} exames de laboratório</h2><span class="spacer"></span>${badgePrio(s.prioridade)}</div>
+      <dl class="dl">
+        <div><dt>Paciente</dt><dd>${h(s.paciente_nome)}</dd></div><div><dt>Idade</dt><dd>${idade(s.paciente_nascimento)} anos</dd></div>
+        <div><dt>Contato</dt><dd>${fTel(s.paciente_telefone)}</dd></div><div><dt>CPF</dt><dd>${fCPF(s.paciente_cpf)}</dd></div>
+        <div><dt>Pedido de</dt><dd>${h(s.unidade_origem_nome || s.unidade_solicitante_nome)}, ${fmtData(s.data_pedido)}</dd></div>
+        <div><dt>Espera</dt><dd>${s.dias_espera} dia(s)</dd></div>
+      </dl>
+      ${rem ? alerta('warn', `Agendamento atual: <b>${dataExtenso(s.vaga_data)}</b> — ${h(s.unidade_executante_nome)} (guia ${h(s.numero_guia)}).`, 'Remarcação') : ''}
+      <h3 class="secao-t">Exames deste paciente</h3>
+      <p class="muted" style="margin-top:0">Os marcados vão para o mesmo dia, na mesma guia. Desmarque o que não for coletar agora.</p>
+      <div id="lb-itens"></div>
+      <h3 class="secao-t">Dia da coleta</h3>
+      <div class="filtros" style="margin-bottom:4px">
+        <div class="field"><label for="lb-uni">Laboratório</label><select id="lb-uni">${optList(locais, '')}</select></div>
+        <div class="field"><label for="lb-de">A partir de</label><input type="date" id="lb-de" value="${hojeISO()}" min="${hojeISO()}"></div>
+      </div>
+      <p class="muted" id="lb-n" aria-live="polite" style="margin:4px 0"></p>
+      <div class="slots" id="lb-dias" role="group" aria-label="Dias disponíveis"></div>
+      <div id="lb-escolha"></div>
+      <div class="acoes" style="border-top:1px solid var(--borda);padding-top:12px">
+        <button type="button" class="btn link" id="lb-det">Ver detalhes e histórico</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn pri lg" id="lb-ok" disabled>Revisar e confirmar ›</button>
+      </div>`;
+
+    const realiza = (uid, pid) => S.unProc.some(x => x.unidade_id === +uid && x.procedimento_id === pid);
+    const pintarItens = () => {
+      const uid = $('#lb-uni').value;
+      $('#lb-itens').innerHTML = doPac.map(x => {
+        const ok = realiza(uid, x.procedimento_id);
+        if(!ok) marcados.delete(x.id);
+        return `<label class="chk" style="display:flex;gap:8px;align-items:flex-start;padding:5px 0">
+          <input type="checkbox" data-sol="${x.id}" ${marcados.has(x.id) ? 'checked' : ''} ${ok ? '' : 'disabled'}>
+          <span><b>${h(x.procedimento_nome)}</b>
+            <small class="muted" style="display:block">Protocolo ${h(x.protocolo)} · ${rotuloStatus(x)}${ok ? '' : ' · <b>este laboratório não realiza</b>'}</small></span></label>`;
+      }).join('') || '<p class="muted">Nenhum exame de laboratório deste paciente aguardando agendamento.</p>';
+      $$('#lb-itens input[data-sol]').forEach(c => c.onchange = () => {
+        c.checked ? marcados.add(+c.dataset.sol) : marcados.delete(+c.dataset.sol);
+        atualizarBotao();
+      });
+      atualizarBotao();
+    };
+    const atualizarBotao = () => { $('#lb-ok').disabled = !(vagaSel && marcados.size); };
+
+    const carregarDias = async () => {
+      vagaSel = null; $('#lb-escolha').innerHTML = ''; atualizarBotao();
+      $('#lb-dias').innerHTML = carregando('Buscando dias…', true);
+      const uid = +$('#lb-uni').value;
+      dias = await q(sb.rpc('dias_laboratorio', { p_unidade:uid, p_de:$('#lb-de').value || hojeISO(), p_ate:null }));
+      const livres = dias.filter(d => d.livres > 0);
+      $('#lb-n').textContent = livres.length ? `${livres.length} dia(s) com vaga.` : '';
+      if(!livres.length){
+        $('#lb-dias').innerHTML = estado({ titulo:'Nenhum dia aberto', texto:`Não há agenda com vaga em <b>${h(nomeUnidade(uid))}</b> a partir desta data.`,
+          acoes: pode('agendas') ? [{ label:'Abrir agenda do laboratório', href:'#/agendas' }] : [] });
+        return;
+      }
+      $('#lb-dias').innerHTML = `<div class="slot-day"><div class="row">${livres.map(d => `
+        <button type="button" class="slot" aria-pressed="false" data-v="${d.vaga_id}"
+          aria-label="${dataExtenso(d.data)}, ${d.livres} vaga(s) de ${d.capacidade}">
+          <b>${fmtData(d.data)}</b><small>${d.ocupadas} de ${d.capacidade} ocupados${feriado(d.data) ? ' · ' + h(feriado(d.data)) : ''}</small></button>`).join('')}</div></div>`;
+      $$('#lb-dias .slot').forEach(b => b.onclick = () => {
+        $$('#lb-dias .slot').forEach(x => x.setAttribute('aria-pressed', 'false'));
+        b.setAttribute('aria-pressed', 'true');
+        vagaSel = dias.find(d => String(d.vaga_id) === b.dataset.v);
+        $('#lb-escolha').innerHTML = alerta('info', `Dia escolhido: <b>${dataExtenso(vagaSel.data)}</b> — ${h(nomeUnidade(+$('#lb-uni').value))}`);
+        atualizarBotao();
+      });
+    };
+
+    $('#lb-uni').onchange = () => { pintarItens(); carregarDias(); };
+    $('#lb-de').onchange = carregarDias;
+    $('#lb-det').onclick = () => abrirSolicitacao(s.id, async () => { await carregar(); filtrar(); limpar(); });
+    $('#lb-ok').onclick = () => confirmarLaboratorio(s, [...marcados], vagaSel, doPac);
+    pintarItens(); carregarDias();
+  }
+
+  async function confirmarLaboratorio(s, ids, v, doPac){
+    const uid = +$('#lb-uni').value, u = S.unidades.find(x => x.id === uid) || {};
+    const itens = doPac.filter(x => ids.includes(x.id));
+    const aposFalta = itens.some(x => x.status === 'faltou');
+    const r = await confirmar({
+      titulo:'Confirmar agendamento', botao:'Confirmar agendamento', cls:'pri',
+      campo: aposFalta ? { label:'Motivo do reagendamento', obrigatorio:true,
+        dica:'Fica registrado no histórico. Ex.: paciente justificou a ausência e pediu nova data.' } : null,
+      html:`<dl class="dl"><div><dt>Paciente</dt><dd>${h(s.paciente_nome)}</dd></div>
+        <div><dt>Dia</dt><dd><b>${dataExtenso(v.data)}</b></dd></div>
+        <div><dt>Local</dt><dd>${h(u.nome)}${u.endereco ? `<small class="muted" style="display:block">${h(u.endereco)}</small>` : ''}</dd></div></dl>
+        <h3 class="secao-t">${itens.length} exame(s) nesta guia</h3>
+        <ul style="margin:0;padding-left:20px">${itens.map(x => `<li>${h(x.procedimento_nome)} <span class="muted">· ${h(x.protocolo)}</span></li>`).join('')}</ul>
+        ${alerta('info', 'Sai uma guia só, com todos os exames. O laboratório confirma o atendimento dos exames de uma vez, pelo número dela.')}` });
+    if(!r.ok) return;
+    try {
+      const guia = await q(sb.rpc('agendar_laboratorio', { p_solicitacoes:ids, p_vaga:v.vaga_id, p_obs:r.texto || null }));
+      const novos = await q(sb.from('vw_solicitacoes').select('*').eq('numero_guia', guia).order('procedimento_nome'));
+      atualizarContadores();
+      aviso(`<b>${h(s.paciente_nome)}</b> — ${novos.length} exame(s) de laboratório em ${dataExtenso(v.data)}, ${h(u.nome)}. Guia nº <b>${h(guia)}</b>.
+        <div class="acoes"><button type="button" class="btn sm pri" id="av-guia">Imprimir guia</button></div>`, 'ok', 'Agendamento concluído');
+      $('#av-guia').onclick = () => imprimirGuia(novos[0], novos);
+      modal({ title:'Agendamento concluído', body:`
+        <div style="text-align:center"><div class="muted">Número da guia</div>
+          <div style="font-size:40px;font-weight:800;color:var(--azul);letter-spacing:.08em">${h(guia)}</div>
+          <p style="font-size:16px"><b>${h(s.paciente_nome)}</b><br>${novos.length} exame(s) de laboratório<br><b>${dataExtenso(v.data)}</b><br>${h(u.nome)}</p></div>
+        <h3 class="secao-t">Próximos passos</h3>
+        <ol style="margin:0;padding-left:20px"><li>Imprima a guia (2 vias) e entregue a do paciente.</li>
+          <li>Oriente sobre o jejum, se o exame pedir, e a levar documento com foto, Cartão SUS, esta guia e o pedido médico.</li>
+          <li>Se o paciente não puder ir, avise pelo telefone ${fTel(s.paciente_telefone)}.</li></ol>`,
+        actions:[{ label:'Próximo da fila' }, { label:'Imprimir guia', cls:'pri', onClick: () => { imprimirGuia(novos[0], novos); return false; } }],
+        onClose: async () => { limpar(); await carregar(); filtrar(); const pr = lista[0]; if(pr && !P.get('pac')) selecionar(pr); } });
+    } catch(e){ $('#lb-escolha').innerHTML = alerta('err', h(e.message), 'Não foi possível agendar'); }
+  }
+
   async function confirmarAgendamento(s, v, rem){
     const u = S.unidades.find(x => x.id === v.unidade_executante_id) || {};
     const aposFalta = s.status === 'faltou';
@@ -2225,7 +2377,10 @@ async function pgAgendamento(el){
 }
 
 /* ---------- Guia de agendamento (2 vias) ---------- */
-function imprimirGuia(s){
+/* itens: as linhas que dividem esta guia. Na guia comum é a própria
+   solicitação; na de laboratório são todos os exames da coleta. */
+function imprimirGuia(s, itens){
+  const exames = (itens && itens.length ? itens : [s]);
   registrarAcesso(s.paciente_id, 'impressão de guia');
   const w = window.open('', '_blank');
   if(!w){ toast('O navegador bloqueou a janela de impressão. Permita pop-ups para este arquivo e tente de novo.', 'err'); return; }
@@ -2249,12 +2404,14 @@ function imprimirGuia(s){
   const via = nome => `<div class="via">
     <div class="cab"><div><img src="${logo}" alt="Regula Posse" style="height:40px"><div style="margin-top:4px"><b>${h(ORGAO)}</b> — Central de Regulação</div><div><b>Guia de Agendamento</b></div></div>
       <div class="g">GUIA Nº<br><b>${h(s.numero_guia)}</b></div></div>
-    <div class="dest">${dataExtenso(s.vaga_data)} às ${fmtHora(s.vaga_hora)}</div>
+    <div class="dest">${dataExtenso(s.vaga_data)}${s.vaga_hora ? ` às ${fmtHora(s.vaga_hora)}` : ''}</div>
     <table>
       <tr><td>Paciente</td><td><b>${h(s.paciente_nome)}</b></td><td>Nascimento</td><td>${fmtData(s.paciente_nascimento)}</td></tr>
       <tr><td>CPF</td><td>${fCPF(s.paciente_cpf)}</td><td>Cartão SUS</td><td>${fCNS(s.paciente_cns)}</td></tr>
-      <tr><td>Telefone</td><td>${fTel(s.paciente_telefone)}</td><td>Protocolo</td><td>${h(s.protocolo)}</td></tr>
-      <tr><td>Procedimento</td><td colspan="3"><b>${h(s.procedimento_nome)}</b>${s.procedimento_codigo ? ' — SIGTAP '+h(s.procedimento_codigo) : ''}</td></tr>
+      <tr><td>Telefone</td><td>${fTel(s.paciente_telefone)}</td><td>Protocolo</td><td>${exames.length > 1 ? `${exames.length} exames (ver abaixo)` : h(s.protocolo)}</td></tr>
+      <tr><td>${exames.length > 1 ? 'Exames' : 'Procedimento'}</td><td colspan="3">${exames.length > 1
+        ? `<ol class="exames">${exames.map(x => `<li><b>${h(x.procedimento_nome)}</b>${x.procedimento_codigo ? ' — SIGTAP '+h(x.procedimento_codigo) : ''} <span class="pr">protocolo ${h(x.protocolo)}</span></li>`).join('')}</ol>`
+        : `<b>${h(s.procedimento_nome)}</b>${s.procedimento_codigo ? ' — SIGTAP '+h(s.procedimento_codigo) : ''}`}</td></tr>
       <tr><td>Local</td><td colspan="3"><b>${h(s.unidade_executante_nome)}</b>${s.unidade_executante_endereco ? ' — '+h(s.unidade_executante_endereco) : ''}${s.unidade_executante_telefone ? ' — Tel. '+fTel(s.unidade_executante_telefone) : ''}</td></tr>
       <tr><td>Profissional</td><td>${h(s.vaga_profissional||'—')}</td><td>Solicitante</td><td>${h(s.profissional_solicitante||'—')}${s.crm_solicitante ? ' ('+h(s.crm_solicitante)+')' : ''}</td></tr>
     </table>
@@ -2281,6 +2438,7 @@ function imprimirGuia(s){
   .acomp .qr{flex:none;line-height:0}
   .acomp .qr svg{width:120px;height:120px;display:block}
   .acomp .url{font-family:monospace;word-break:break-all}
+  .exames{margin:2px 0 0;padding-left:18px}.exames li{margin-bottom:1px}.exames .pr{color:#555;font-size:10.5px}
   .corte{border-top:1px dashed #000;margin:18px 0;text-align:center;font-size:10px;color:#555}
   @media print{button{display:none}body{margin:0 auto}@page{size:A4 portrait;margin:10mm}}</style></head><body>
   ${via('Via do paciente')}<div class="corte">✂ recorte aqui</div>${via('Via do local de atendimento')}
@@ -2329,8 +2487,11 @@ async function pgConfirmacao(el){
     const real = status === 'realizada';
     const r = await confirmar({ titulo: real ? 'Confirmar execução' : 'Registrar falta', botao: real ? 'Confirmar execução' : 'Registrar falta', cls: real ? 'ok' : 'err',
       html:`<dl class="dl"><div><dt>Guia</dt><dd><b>${h(s.numero_guia)}</b></dd></div><div><dt>Paciente</dt><dd>${h(s.paciente_nome)}</dd></div>
-        <div><dt>Procedimento</dt><dd>${h(s.procedimento_nome)}</dd></div><div><dt>Agendado para</dt><dd>${fmtData(s.vaga_data)} às ${fmtHora(s.vaga_hora)}</dd></div></dl>
-        ${alerta(real ? 'info' : 'warn', real ? 'O atendimento será registrado como <b>realizado</b>. Isso encerra a solicitação.' : 'O paciente será registrado como <b>faltoso</b>. Isso encerra a solicitação; se ele ainda precisar do atendimento, será necessária nova solicitação.', 'O que acontece')}`,
+        <div><dt>${(s.itens?.length || 1) > 1 ? 'Exames' : 'Procedimento'}</dt><dd>${(s.itens?.length || 1) > 1
+          ? `<b>${s.itens.length} exames</b><small class="muted" style="display:block">${h(s.itens.map(x => x.procedimento_nome).join(', '))}</small>`
+          : h(s.procedimento_nome)}</dd></div>
+        <div><dt>Agendado para</dt><dd>${fmtData(s.vaga_data)}${s.vaga_hora ? ` às ${fmtHora(s.vaga_hora)}` : ''}</dd></div></dl>
+        ${alerta(real ? 'info' : 'warn', real ? `${(s.itens?.length || 1) > 1 ? 'Os exames desta guia serão registrados' : 'O atendimento será registrado'} como <b>realizado</b>. Isso encerra ${(s.itens?.length || 1) > 1 ? 'todos eles' : 'a solicitação'}.` : `O paciente será registrado como <b>faltoso</b> em ${(s.itens?.length || 1) > 1 ? 'todos os exames desta guia' : 'esta solicitação'}; se ainda precisar do atendimento, será necessária nova solicitação.`, 'O que acontece')}`,
       campo:{ label:'Observação', obrigatorio:false, dica: real ? 'Ex.: realizado sem intercorrências.' : 'Ex.: paciente avisou que não viria; sem contato.' } });
     if(!r.ok) return false;
     await ocupado(btn, () => q(sb.rpc('confirmar_atendimento', { p_guia:s.numero_guia, p_status:status, p_obs:r.texto || null })));
@@ -2348,8 +2509,9 @@ async function pgConfirmacao(el){
     const sit = await q(sb.rpc('consultar_guia', { p_guia:guia }));
     if(!sit.encontrada){ box.innerHTML = alerta('err', `Não existe guia com o número <b>${h(guia)}</b>. Confira os números na guia impressa. Se o paciente não tiver guia, procure a Central de Regulação.`, 'Guia não encontrada'); return; }
     if(sit.outro_local){ box.innerHTML = alerta('warn', `A guia <b>${h(guia)}</b> é de outro local de atendimento: <b>${h(sit.local_nome || '—')}</b>${sit.data ? `, em ${fmtData(sit.data)}` : ''}. Oriente o paciente a ir ao local indicado na guia.`, 'Guia de outro local'); return; }
-    const s = await q(sb.from('vw_solicitacoes').select('*').eq('numero_guia', guia).maybeSingle());
-    if(!s){ box.innerHTML = alerta('err', 'Seu perfil não tem acesso a esta guia.', 'Sem acesso'); return; }
+    const linhas = await q(sb.from('vw_solicitacoes').select('*').eq('numero_guia', guia).order('procedimento_nome'));
+    if(!linhas.length){ box.innerHTML = alerta('err', 'Seu perfil não tem acesso a esta guia.', 'Sem acesso'); return; }
+    const s = { ...linhas[0], itens:linhas };
     const fim = s.status !== 'agendada', futura = s.vaga_data > hojeISO();
     box.innerHTML = `<div class="res-guia ${s.status==='realizada'?'fim-ok':['faltou','cancelada'].includes(s.status)?'fim-err':''}">
       <div class="row"><div><div class="muted">Guia</div><div class="gnum">${h(s.numero_guia)}</div></div><span class="spacer"></span>${badgeSt(s)}</div>
@@ -2357,9 +2519,11 @@ async function pgConfirmacao(el){
         <div><dt>Paciente</dt><dd><b>${h(s.paciente_nome)}</b></dd></div>
         <div><dt>Nascimento</dt><dd>${fmtData(s.paciente_nascimento)} (${idade(s.paciente_nascimento)} anos)</dd></div>
         <div><dt>CPF</dt><dd>${fCPF(s.paciente_cpf)}</dd></div><div><dt>Cartão SUS</dt><dd>${fCNS(s.paciente_cns)}</dd></div>
-        <div><dt>Procedimento</dt><dd>${h(s.procedimento_nome)}</dd></div><div><dt>Local</dt><dd>${h(s.unidade_executante_nome || '—')}</dd></div>
-        <div><dt>Data e hora</dt><dd>${s.vaga_data ? `${dataExtenso(s.vaga_data)} às ${fmtHora(s.vaga_hora)}` : '—'}</dd></div><div><dt>Profissional</dt><dd>${h(s.vaga_profissional || '—')}</dd></div>
+        <div><dt>${linhas.length > 1 ? 'Exames' : 'Procedimento'}</dt><dd>${linhas.length > 1
+          ? `<b>${linhas.length} exames</b>` : h(s.procedimento_nome)}</dd></div><div><dt>Local</dt><dd>${h(s.unidade_executante_nome || '—')}</dd></div>
+        <div><dt>Data${s.vaga_hora ? ' e hora' : ''}</dt><dd>${s.vaga_data ? `${dataExtenso(s.vaga_data)}${s.vaga_hora ? ` às ${fmtHora(s.vaga_hora)}` : ''}` : '—'}</dd></div><div><dt>Profissional</dt><dd>${h(s.vaga_profissional || '—')}</dd></div>
       </dl>
+      ${linhas.length > 1 ? `<ol class="exames-guia">${linhas.map(x => `<li>${h(x.procedimento_nome)} ${badgeSt(x)}<small class="muted">protocolo ${h(x.protocolo)}</small></li>`).join('')}</ol>` : ''}
       ${s.status === 'cancelada' ? alerta('err', 'Esta solicitação foi cancelada. Não há atendimento a confirmar.', 'Guia cancelada')
         : fim ? alerta(s.status === 'realizada' ? 'ok' : 'err', `${h(STATUS[s.status])} registrada em ${fmtDataHora(s.data_execucao || s.updated_at)} por ${h(s.confirmado_por_nome || '—')}.${s.obs_execucao ? '<br>Observação: ' + h(s.obs_execucao) : ''} Não é possível registrar de novo.`, 'Guia já finalizada')
         : futura ? alerta('warn', `Este atendimento está marcado para <b>${dataExtenso(s.vaga_data)}</b>. A execução só pode ser confirmada a partir dessa data. Confira se o paciente veio no dia certo.`, 'Atendimento futuro')
@@ -2385,7 +2549,8 @@ async function pgConfirmacao(el){
     qb = modo === 'dia' ? qb.eq('vaga_data', d).in('status', ['agendada','realizada','faltou']) : qb.eq('status', 'agendada').lte('vaga_data', hojeISO());
     if(loc) qb = qb.eq('unidade_executante_id', loc);
     $('#d-lista').innerHTML = carregando('Carregando atendimentos…', true);
-    atual = (await q(qb)).sort((a, b) => (a.vaga_data + a.vaga_hora).localeCompare(b.vaga_data + b.vaga_hora));
+    atual = agruparPorGuia(await q(qb))
+      .sort((a, b) => (a.vaga_data + (a.vaga_hora || '')).localeCompare(b.vaga_data + (b.vaga_hora || '')));
     mostrar();
   }
   function mostrar(){
@@ -2400,10 +2565,12 @@ async function pgConfirmacao(el){
       onClick: s => { buscar(s.numero_guia); $('#g-num').scrollIntoView({ block:'center', behavior:'smooth' }); },
       colunas:[
         ...(modo === 'pend' ? [{ l:'Data', f:s => fmtData(s.vaga_data), v:s => s.vaga_data }] : []),
-        { l:'Hora', f:s => `<b>${fmtHora(s.vaga_hora)}</b>`, v:s => s.vaga_hora },
+        { l:'Hora', f:s => s.vaga_hora ? `<b>${fmtHora(s.vaga_hora)}</b>` : '<span class="muted">dia todo</span>', v:s => s.vaga_hora || '' },
         { l:'Guia', f:s => h(s.numero_guia), v:s => s.numero_guia },
         { l:'Paciente', f:s => `${h(s.paciente_nome)}<small>${fTel(s.paciente_telefone)}</small>`, v:s => s.paciente_nome },
-        { l:'Procedimento', f:s => h(s.procedimento_nome), v:s => s.procedimento_nome },
+        { l:'Procedimento', f:s => s.itens.length > 1
+            ? `<b>${s.itens.length} exames</b><small>${h(s.itens.map(x => x.procedimento_nome).join(', '))}</small>`
+            : h(s.procedimento_nome), v:s => s.procedimento_nome },
         ...(loc ? [] : [{ l:'Local', f:s => h(s.unidade_executante_nome), v:s => s.unidade_executante_nome }]),
         { l:'Situação', f:s => badgeSt(s), v:s => s.status },
         { l:'Ações', ml:'', ordenavel:false, cls:'nowrap', f:s => s.status === 'agendada' ? `<button type="button" class="btn sm ok" data-a="realizada" data-id="${s.id}" ${s.vaga_data > hojeISO() ? 'disabled title="Disponível na data do atendimento"' : ''}>✓ Realizado<span class="sr-only"> — ${h(s.paciente_nome)}</span></button>
@@ -2464,6 +2631,7 @@ async function abaVagas(el){
   let vis = P.get('vis') || store.get('regula_agenda_vis') || 'cal', mes = hojeISO().slice(0,7), semIni = inicioSemana(hojeISO());
   await carregarProfs();
   acaoTopo('+ Cadastrar agenda', 'pri', () => gerarVagas(execs, recarregar, { unidade:+$('#v-uni').value || null, prof:$('#v-prof').value.trim() }));
+  if(locaisDeLab().length) acaoTopo('+ Agenda de laboratório', '', () => gerarAgendaLab(recarregar, +$('#v-uni').value || null));
   el.innerHTML = `<div class="filtros no-print">
       <div class="field"><span class="lbl" id="v-vis-l">Visualizar</span><div class="seg" id="v-vis" role="group" aria-labelledby="v-vis-l">
         <button type="button" data-v="cal">Mês</button><button type="button" data-v="semana">Semana</button><button type="button" data-v="lista">Lista de vagas</button></div></div>
@@ -2610,6 +2778,73 @@ function inicioSemana(iso){ const d = new Date(iso+'T12:00'); return addDias(iso
    Dias específicos (calendário) · toda semana / quinzenal · todo mês
    Vários turnos por dia · horário marcado ou ordem de chegada
    =================================================================== */
+/* ---------- Agenda diária do laboratório ----------
+   Não tem turno, intervalo nem profissional: tem dia e quantos pacientes
+   cabem. Modal separado do de horários de propósito — juntar os dois
+   deixaria uma tela com metade dos campos desligada o tempo todo. */
+function gerarAgendaLab(depois, unidadePre){
+  const locais = locaisDeLab();
+  if(!locais.length) return toast('Nenhum local realiza exame de laboratório. Marque os exames como laboratório e vincule-os ao local.', 'err');
+  const hoje = hojeISO();
+  const st = { dias:[1,2,3,4,5] };
+
+  const datas = () => {
+    const de = $('#l-de').value, ate = $('#l-ate').value, out = [];
+    if(!de || !ate || ate < de) return out;
+    for(let d = de; d <= ate && out.length < 400; d = addDias(d, 1)){
+      if(st.dias.includes(new Date(d + 'T12:00').getDay())) out.push(d);
+    }
+    return out;
+  };
+  const resumir = () => {
+    const l = datas(), cap = +$('#l-cap').value || 0;
+    $('#l-resumo').innerHTML = l.length && cap
+      ? `<b>${num(l.length)}</b> dia(s), <b>${num(cap)}</b> paciente(s) por dia — até <b>${num(l.length * cap)}</b> atendimentos.`
+      : '<span class="muted">Escolha o período, os dias da semana e a capacidade.</span>';
+  };
+
+  const DOW = [['Dom',0],['Seg',1],['Ter',2],['Qua',3],['Qui',4],['Sex',5],['Sáb',6]];
+  modal({
+    title: 'Agenda de laboratório', wide: true,
+    body: `
+      ${alerta('info', 'A agenda do laboratório é por dia, não por horário: o paciente é marcado para o dia da coleta e leva uma guia só com todos os exames do pedido.')}
+      <div class="grid">
+        <div class="field s2"><label for="l-uni">Laboratório *</label><select id="l-uni">${optList(locais, unidadePre || locais[0].id)}</select></div>
+        <div class="field s2"><label for="l-cap">Pacientes por dia *</label><input type="number" id="l-cap" min="1" max="500" value="30" inputmode="numeric">
+          <small class="dica">Quantas pessoas o laboratório coleta por dia. Ao encher, o dia para de aparecer no agendamento.</small></div>
+        <div class="field s2"><label for="l-de">De *</label><input type="date" id="l-de" value="${hoje}" min="${hoje}"></div>
+        <div class="field s2"><label for="l-ate">Até *</label><input type="date" id="l-ate" value="${addDias(hoje, 30)}" min="${hoje}"></div>
+        <div class="field full"><span class="lbl">Dias da semana</span>
+          <div class="row" id="l-dow" role="group" aria-label="Dias da semana">
+            ${DOW.map(([r, n]) => `<button type="button" class="btn sm" data-d="${n}" aria-pressed="${st.dias.includes(n)}">${r}</button>`).join('')}
+          </div></div>
+      </div>
+      <p id="l-resumo" aria-live="polite" style="margin:10px 0 0"></p>`,
+    onOpen: m => {
+      const pintar = () => $$('#l-dow button', m).forEach(b => {
+        const on = st.dias.includes(+b.dataset.d);
+        b.setAttribute('aria-pressed', on); b.classList.toggle('pri', on);
+      });
+      $$('#l-dow button', m).forEach(b => b.onclick = () => {
+        const d = +b.dataset.d;
+        st.dias = st.dias.includes(d) ? st.dias.filter(x => x !== d) : [...st.dias, d];
+        pintar(); resumir();
+      });
+      ['l-de','l-ate','l-cap'].forEach(id => { const e = $('#'+id, m); e.oninput = resumir; e.onchange = resumir; });
+      pintar(); resumir();
+    },
+    actions:[{ label:'Cancelar' }, { label:'Abrir agenda', cls:'pri', onClick: async m => {
+      const uni = +$('#l-uni', m).value, cap = +$('#l-cap', m).value, l = datas();
+      if(!l.length) throw new Error('Nenhum dia no período escolhido. Confira as datas e os dias da semana.');
+      if(!(cap >= 1 && cap <= 500)) throw new Error('Informe de 1 a 500 pacientes por dia.');
+      const r = await q(sb.rpc('gerar_vagas_dia', { p_unidade:uni, p_datas:l, p_capacidade:cap }));
+      const ign = (r.ignoradas || []).length;
+      aviso(`Agenda de <b>${h(nomeUnidade(uni))}</b>: ${num(r.vagas)} dia(s) aberto(s), ${num(cap)} paciente(s) por dia.`
+        + (ign ? ` <span class="muted">${num(ign)} dia(s) ignorado(s) por já terem agenda ou estarem no passado.</span>` : ''), 'ok');
+      await depois();
+    }}]});
+}
+
 function gerarVagas(execs, depois, pre={}){
   if(!execs.length) return toast('Cadastre primeiro um local de atendimento (aba "Locais de atendimento").', 'err');
   const hoje = hojeISO();
@@ -3184,12 +3419,15 @@ function pgProcedimentos(el){
       { name:'especialidade', label:'Especialidade', span:2 },
       { name:'ativo', label:'Situação', type:'checkbox', text:'Ativo' },
       { name:'exige_regulacao', label:'Regulação', type:'checkbox', text:'Exige análise do regulador antes do agendamento', span:4,
-        dica:'Quando marcado, as solicitações deste procedimento que ainda não foram agendadas passam a aguardar a Análise regulatória. Desmarcado, vão direto para o agendamento.' } ],
+        dica:'Quando marcado, as solicitações deste procedimento que ainda não foram agendadas passam a aguardar a Análise regulatória. Desmarcado, vão direto para o agendamento.' },
+      { name:'laboratorio', label:'Laboratório', type:'checkbox', text:'É exame de laboratório (coleta)', span:4,
+        dica:'Exames marcados aqui não têm hora marcada: entram na agenda diária do laboratório, junto com os outros exames do mesmo pedido, numa guia só. Não marque raio-x, ultrassom e outros exames com horário.' } ],
     validar:(o, err) => { if(o.codigo_sigtap && !/^\d{10}$/.test(o.codigo_sigtap)) err('codigo_sigtap', 'O código SIGTAP tem 10 números.'); },
     colunas:[ { l:'Nome', f:d => `<b>${h(d.nome)}</b>`, v:d => d.nome },
       { l:'SIGTAP', f:d => d.codigo_sigtap ? h(d.codigo_sigtap) : '<span class="tag inc">sem código</span>', v:d => d.codigo_sigtap || '' },
       { l:'Tipo', f:d => h(TIPOS_PROC[d.tipo]), v:d => d.tipo }, { l:'Especialidade', f:d => h(d.especialidade || '—'), v:d => d.especialidade || '' },
-      { l:'Regulação', f:d => d.exige_regulacao ? tagReg() : '<span class="muted">Direto para agendamento</span>', v:d => d.exige_regulacao ? 0 : 1 },
+      { l:'Regulação', f:d => (d.exige_regulacao ? tagReg() : '<span class="muted">Direto para agendamento</span>')
+          + (d.laboratorio ? ' <span class="tag">laboratório</span>' : ''), v:d => (d.exige_regulacao ? 0 : 1) },
       { l:'Locais que realizam', f:d => { const ids = S.unProc.filter(x => x.procedimento_id === d.id).map(x => x.unidade_id);
           return ids.length ? h(ids.map(nomeUnidade).join(', ')) : '<span class="tag inc">nenhum</span>'; }, v:d => S.unProc.filter(x => x.procedimento_id === d.id).length } ] });
 }

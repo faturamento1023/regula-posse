@@ -514,3 +514,111 @@ begin
 end $$;
 
 select 'TESTES DA MIGRAÇÃO 007 PASSARAM' as resultado;
+
+-- ---------------------------------------------------------------------
+--  MIGRAÇÃO 008 — agenda diária de laboratório
+-- ---------------------------------------------------------------------
+do $$
+declare
+  lab bigint; ubs bigint; p1 bigint; p2 bigint; p3 bigint;
+  maria bigint; joao bigint; carlos bigint;
+  dia1 bigint; g text; g2 text; n int; sol bigint[]; s4 bigint;
+begin
+  insert into unidades (nome, tipo) values ('Laboratório Teste', 'executante') returning id into lab;
+  select id into ubs from unidades where nome = 'UBS Teste';
+  insert into procedimentos (nome, tipo, laboratorio, ativo) values ('Hemograma teste','exame',true,true) returning id into p1;
+  insert into procedimentos (nome, tipo, laboratorio, ativo) values ('Glicose teste','exame',true,true) returning id into p2;
+  insert into procedimentos (nome, tipo, laboratorio, ativo) values ('Raio-x teste','exame',false,true) returning id into p3;
+  insert into unidade_procedimentos (unidade_id, procedimento_id) values (lab,p1),(lab,p2);
+  insert into pacientes (nome, cpf, data_nascimento, sexo) values ('Maria Lab','52998224725','1970-01-01','F') returning id into maria;
+  insert into pacientes (nome, cpf, data_nascimento, sexo) values ('João Lab','87748248800','1980-01-01','M') returning id into joao;
+  insert into pacientes (nome, cpf, data_nascimento, sexo) values ('Carlos Lab','71428793860','1990-01-01','M') returning id into carlos;
+
+  -- abre 2 pacientes por dia
+  perform gerar_vagas_dia(lab, array[current_date, current_date+1]::date[], 2);
+  select count(*) into n from vagas where unidade_executante_id = lab and procedimento_id is null;
+  if n <> 2 then raise exception 'devia ter aberto 2 dias, abriu %', n; end if;
+
+  -- rodar de novo não duplica
+  perform gerar_vagas_dia(lab, array[current_date, current_date+1]::date[], 2);
+  select count(*) into n from vagas where unidade_executante_id = lab and procedimento_id is null;
+  if n <> 2 then raise exception 'rodar de novo devia ignorar os dias já abertos, agora há %', n; end if;
+
+  select vaga_id into dia1 from dias_laboratorio(lab) order by data limit 1;
+
+  -- Maria: dois exames do mesmo pedido, numa guia só
+  insert into solicitacoes (paciente_id, procedimento_id, unidade_solicitante_id, data_pedido)
+  values (maria, p1, ubs, current_date) returning id into s4;
+  sol := array[s4];
+  insert into solicitacoes (paciente_id, procedimento_id, unidade_solicitante_id, data_pedido)
+  values (maria, p2, ubs, current_date) returning id into s4;
+  sol := sol || s4;
+
+  g := agendar_laboratorio(sol, dia1);
+  if (select count(distinct numero_guia) from solicitacoes where id = any(sol)) <> 1 then
+    raise exception 'os dois exames deviam dividir uma guia só'; end if;
+  if (select count(*) from solicitacoes where id = any(sol) and status = 'agendada') <> 2 then
+    raise exception 'os dois exames deviam ficar agendados'; end if;
+  if vaga_ocupacao(dia1) <> 1 then raise exception 'dois exames de um paciente ocupam 1 lugar, não %', vaga_ocupacao(dia1); end if;
+
+  -- exame que chega depois entra na mesma guia
+  insert into solicitacoes (paciente_id, procedimento_id, unidade_solicitante_id, data_pedido)
+  values (maria, p1, ubs, current_date) returning id into s4;
+  g2 := agendar_laboratorio(array[s4], dia1);
+  if g2 <> g then raise exception 'exame novo no mesmo dia devia entrar na guia %, veio %', g, g2; end if;
+  if vaga_ocupacao(dia1) <> 1 then raise exception 'continua sendo um paciente só'; end if;
+
+  -- João ocupa o segundo lugar e o dia fecha
+  insert into solicitacoes (paciente_id, procedimento_id, unidade_solicitante_id, data_pedido)
+  values (joao, p1, ubs, current_date) returning id into s4;
+  perform agendar_laboratorio(array[s4], dia1);
+  if vaga_ocupacao(dia1) <> 2 then raise exception 'deviam ser 2 pacientes'; end if;
+  if (select status from vagas where id = dia1) <> 'ocupada' then raise exception 'o dia devia ter fechado'; end if;
+
+  -- Carlos não cabe
+  insert into solicitacoes (paciente_id, procedimento_id, unidade_solicitante_id, data_pedido)
+  values (carlos, p1, ubs, current_date) returning id into s4;
+  begin
+    perform agendar_laboratorio(array[s4], dia1);
+    raise exception 'o terceiro paciente devia ter sido recusado';
+  exception when others then
+    if sqlerrm not like '%cheia%' then raise exception 'erro errado ao lotar: %', sqlerrm; end if;
+  end;
+
+  -- a vaga de dia não entra pelo agendamento comum
+  begin
+    perform agendar(s4, (select vaga_id from dias_laboratorio(lab) order by data offset 1 limit 1));
+    raise exception 'agendar() devia recusar a vaga de dia';
+  exception when others then
+    if sqlerrm not like '%agenda diária%' then raise exception 'erro errado em agendar(): %', sqlerrm; end if;
+  end;
+
+  -- exame que não é de laboratório
+  insert into unidade_procedimentos (unidade_id, procedimento_id) values (lab,p3);
+  insert into solicitacoes (paciente_id, procedimento_id, unidade_solicitante_id, data_pedido)
+  values (carlos, p3, ubs, current_date) returning id into s4;
+  begin
+    perform agendar_laboratorio(array[s4], (select vaga_id from dias_laboratorio(lab) order by data offset 1 limit 1));
+    raise exception 'exame fora do laboratório devia ter sido recusado';
+  exception when others then
+    if sqlerrm not like '%laboratório%' then raise exception 'erro errado para exame não-laboratorial: %', sqlerrm; end if;
+  end;
+
+  -- pacientes diferentes na mesma chamada
+  begin
+    perform agendar_laboratorio(sol || array[(select id from solicitacoes where paciente_id = joao limit 1)],
+                                (select vaga_id from dias_laboratorio(lab) order by data offset 1 limit 1));
+    raise exception 'exames de pacientes diferentes deviam ter sido recusados';
+  exception when others then
+    if sqlerrm not like '%pacientes diferentes%' then raise exception 'erro errado para pacientes diferentes: %', sqlerrm; end if;
+  end;
+
+  -- confirmar a guia fecha TODOS os exames dela
+  perform confirmar_atendimento(g, 'realizada');
+  select count(*) into n from solicitacoes where numero_guia = g and status <> 'realizada';
+  if n <> 0 then raise exception '% exame(s) da guia ficaram para trás na confirmação', n; end if;
+  select count(*) into n from solicitacoes where numero_guia = g;
+  if n <> 3 then raise exception 'a guia devia ter 3 exames, tem %', n; end if;
+end $$;
+
+select 'TESTES DA MIGRAÇÃO 008 PASSARAM' as resultado;
