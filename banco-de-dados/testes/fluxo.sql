@@ -473,3 +473,44 @@ begin
 end $$;
 
 select 'TESTES DA MIGRAÇÃO 005 PASSARAM' as resultado;
+
+-- ---------------------------------------------------------------------
+--  MIGRAÇÃO 007 — a central de regulação como tipo de unidade
+-- ---------------------------------------------------------------------
+do $$
+declare a bigint; b bigint; n int; marcada boolean;
+begin
+  insert into unidades (nome, tipo) values ('Central A', 'regulacao') returning id into a;
+  select reguladora into marcada from unidades where id = a;
+  if not marcada then raise exception 'tipo regulacao devia marcar reguladora'; end if;
+
+  -- a marca é derivada: mexer nela à mão não cria divergência
+  update unidades set reguladora = false where id = a;
+  select reguladora into marcada from unidades where id = a;
+  if not marcada then raise exception 'reguladora devia voltar a true, é derivada do tipo'; end if;
+
+  -- trocar o tipo desmarca
+  update unidades set tipo = 'solicitante' where id = a;
+  select reguladora into marcada from unidades where id = a;
+  if marcada then raise exception 'deixar de ser regulacao devia desmarcar'; end if;
+
+  -- só uma central: a segunda é recusada
+  update unidades set tipo = 'regulacao' where id = a;
+  begin
+    insert into unidades (nome, tipo) values ('Central B', 'regulacao') returning id into b;
+    raise exception 'uma segunda central devia ter sido recusada';
+  exception when unique_violation then null;
+  end;
+
+  select count(*) into n from unidades where reguladora;
+  if n <> 1 then raise exception 'devia haver exatamente uma reguladora, há %', n; end if;
+
+  -- o MIRA para de reclamar quando existe uma
+  if exists (select 1 from mira_pendencias() where problema like '%reguladora%') then
+    raise exception 'com central cadastrada não devia haver pendência de reguladora';
+  end if;
+
+  delete from unidades where id = a;
+end $$;
+
+select 'TESTES DA MIGRAÇÃO 007 PASSARAM' as resultado;
