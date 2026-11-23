@@ -847,30 +847,38 @@ async function pgAcompanhar(el){
 
     const btn = $('#ac-f button[type=submit]');
     const r = await ocupado(btn, () => q(sb.rpc('consultar_protocolo', { p_protocolo: p, p_nascimento: nasc })));
-    const d = Array.isArray(r) ? r[0] : r;
+    /* Um protocolo pode trazer vários exames — é o pedido de laboratório. */
+    const itens = (Array.isArray(r) ? r : [r]).filter(Boolean);
+    const d = itens[0];
 
     if(!d || d.resultado === 'incompleto') return erro('Informe o protocolo e a data de nascimento.');
     if(d.resultado === 'limite') return erro('Tivemos muitas consultas em pouco tempo. Aguarde alguns minutos e tente de novo.');
     if(d.resultado === 'nao_encontrado') return erro('Não encontramos esse protocolo com essa data de nascimento. Confira os dois dados na sua guia.');
 
     const linha = (rot, val) => val ? `<div><dt>${h(rot)}</dt><dd>${val}</dd></div>` : '';
+    const bloco = x => `
+      <dl class="dl">
+        ${linha('Situação', `<b>${h(x.situacao)}</b>`)}
+        ${itens.length > 1 ? '' : linha('Procedimento', h(x.procedimento))}
+        ${linha('Data do pedido médico', fmtData(x.data_pedido))}
+        ${linha('Tempo desde o pedido', x.dias_desde_pedido != null ? `${num(x.dias_desde_pedido)} dia(s)` : '')}
+        ${linha('Posição na fila deste procedimento', x.posicao != null ? `${num(x.posicao)}º` : '')}
+        ${x.agendada_data ? linha('Atendimento marcado', `<b>${h(dataExtenso(x.agendada_data))}${x.agendada_hora ? ` às ${h(fmtHora(x.agendada_hora))}` : ''}</b>`) : ''}
+        ${linha('Local', h(x.local_nome))}
+        ${linha('Endereço', h(x.local_endereco))}
+        ${linha('Telefone do local', x.local_telefone ? h(fTel(x.local_telefone)) : '')}
+        ${linha('Motivo informado pela regulação', h(x.parecer))}
+      </dl>`;
     $('#ac-res').innerHTML = `
       <h3 style="margin-top:22px">Protocolo ${h(d.protocolo)}</h3>
-      <dl class="dl">
-        ${linha('Situação', `<b>${h(d.situacao)}</b>`)}
-        ${linha('Procedimento', h(d.procedimento))}
-        ${linha('Data do pedido médico', fmtData(d.data_pedido))}
-        ${linha('Tempo desde o pedido', d.dias_desde_pedido != null ? `${num(d.dias_desde_pedido)} dia(s)` : '')}
-        ${linha('Posição na fila deste procedimento', d.posicao != null ? `${num(d.posicao)}º` : '')}
-        ${d.agendada_data ? linha('Atendimento marcado', `<b>${h(dataExtenso(d.agendada_data))} às ${h(fmtHora(d.agendada_hora))}</b>`) : ''}
-        ${linha('Local', h(d.local_nome))}
-        ${linha('Endereço', h(d.local_endereco))}
-        ${linha('Telefone do local', d.local_telefone ? h(fTel(d.local_telefone)) : '')}
-        ${linha('Motivo informado pela regulação', h(d.parecer))}
-      </dl>
-      ${d.posicao != null ? alerta('info', 'A posição na fila muda conforme chegam casos de maior risco clínico, '
+      ${itens.length > 1
+        ? `<p class="muted" style="margin-top:0">Este protocolo tem <b>${itens.length} exames</b>, pedidos juntos.</p>`
+          + itens.map(x => `<section style="border-top:1px solid var(--borda);padding-top:10px;margin-top:10px">
+              <h4 style="margin:0 0 6px">${h(x.procedimento)}</h4>${bloco(x)}</section>`).join('')
+        : bloco(d)}
+      ${itens.some(x => x.posicao != null) ? alerta('info', 'A posição na fila muda conforme chegam casos de maior risco clínico, '
           + 'conforme o protocolo da regulação municipal. Ela é uma estimativa, não uma garantia de data.') : ''}
-      ${d.agendada_data ? alerta('warn', 'Se não puder comparecer, avise a Secretaria de Saúde com antecedência '
+      ${itens.some(x => x.agendada_data) ? alerta('warn', 'Se não puder comparecer, avise a Secretaria de Saúde com antecedência '
           + 'para que a vaga seja remanejada para outro paciente.') : ''}`;
   }
 
@@ -1637,7 +1645,16 @@ async function pgSolicitacao(el){
       profissional_solicitante:W.profissional, crm_solicitante:W.crm || null, data_pedido:brParaISO(W.data_pedido),
       cid10:(W.cid10 || '').replace('.', '') || null, prioridade:W.prioridade, justificativa:W.justificativa || null };
     try {
-      const criadas = await q(sb.from('solicitacoes').insert(W.itens.map(pid => ({ ...base, procedimento_id:pid }))).select('id,protocolo,procedimento_id'));
+      /* Os exames de laboratório do mesmo pedido saem com UM protocolo: é uma
+         folha só na mão do paciente, uma coleta só, e ele vai perguntar por um
+         número. Consulta e exame de imagem seguem com protocolo próprio —
+         são atendimentos em dias e locais diferentes. */
+      const temLab = W.itens.some(ehLab);
+      const protLab = temLab ? await q(sb.rpc('gerar_protocolo')) : null;
+      const criadas = await q(sb.from('solicitacoes')
+        .insert(W.itens.map(pid => ehLab(pid) ? { ...base, procedimento_id:pid, protocolo:protLab }
+                                              : { ...base, procedimento_id:pid }))
+        .select('id,protocolo,procedimento_id'));
       /* Os anexos sobem DEPOIS do registro, porque o caminho no bucket é
          derivado do id da solicitação e é dele que sai a regra de acesso.
          Falha aqui não desfaz o registro: a solicitação existe e o
@@ -1649,8 +1666,12 @@ async function pgSolicitacao(el){
         ${alerta('ok', `Solicitação de <b>${h(pac.nome)}</b> registrada em ${fmtDataHora(new Date())}.`, 'Registro concluído')}
         <h2 id="ok-t" tabindex="-1" style="font-size:18px">Protocolos gerados</h2>
         <div class="tbl-wrap"><table class="resp"><thead><tr><th>Protocolo</th><th>Procedimento</th><th>Próximo passo</th></tr></thead><tbody>
-          ${criadas.map(c => `<tr><td data-label="Protocolo"><b>${h(c.protocolo)}</b></td><td data-label="Procedimento">${h(nomeProc(c.procedimento_id))}</td>
-            <td data-label="Próximo passo">${procExige(c.procedimento_id) ? `${badgeSt('regulacao')} <span class="sub-linha">O regulador vai analisar; a unidade acompanha em Solicitações.</span>` : `${badgeSt('pendente')} <span class="sub-linha">Pode ser agendado agora.</span>`}</td></tr>`).join('')}
+          ${Object.entries(criadas.reduce((m, c) => { (m[c.protocolo] ||= []).push(c); return m; }, {})).map(([prot, cs]) =>
+            `<tr><td data-label="Protocolo"><b>${h(prot)}</b></td>
+              <td data-label="Procedimento">${cs.length > 1
+                ? `<b>${cs.length} exames de laboratório</b><small class="sub-linha">${h(cs.map(c => nomeProc(c.procedimento_id)).join(', '))}</small>`
+                : h(nomeProc(cs[0].procedimento_id))}</td>
+            <td data-label="Próximo passo">${procExige(cs[0].procedimento_id) ? `${badgeSt('regulacao')} <span class="sub-linha">O regulador vai analisar; a unidade acompanha em Solicitações.</span>` : `${badgeSt('pendente')} <span class="sub-linha">Pode ser agendado agora.</span>`}</td></tr>`).join('')}
         </tbody></table></div>
         ${envio.falhas.length ? alerta('err', `Não foi possível anexar: <b>${h([...new Set(envio.falhas)].join(', '))}</b>. A solicitação foi registrada; abra o detalhe dela para anexar de novo.`, 'Anexo não enviado') : ''}
         ${envio.enviados ? `<p class="muted" style="margin-top:10px">${num(envio.enviados)} documento(s) anexado(s).</p>` : ''}
@@ -2435,7 +2456,7 @@ function imprimirComprovante(linhas){
       <tr><td>CPF</td><td>${fCPF(s.paciente_cpf)}</td><td>Cartão SUS</td><td>${fCNS(s.paciente_cns)}</td></tr>
       <tr><td>Telefone</td><td>${fTel(s.paciente_telefone)}</td><td>Registrada em</td><td>${fmtData(hojeISO())}</td></tr>
       <tr><td>${l.length > 1 ? 'Procedimentos' : 'Procedimento'}</td><td colspan="3">${l.length > 1
-        ? `<ol class="itens">${l.map(x => `<li><b>${h(x.procedimento_nome)}</b> <span class="pr">protocolo ${h(x.protocolo)}</span></li>`).join('')}</ol>`
+        ? `<ol class="itens">${l.map(x => `<li><b>${h(x.procedimento_nome)}</b>${x.protocolo === s.protocolo ? '' : ` <span class="pr">protocolo ${h(x.protocolo)}</span>`}</li>`).join('')}</ol>`
         : `<b>${h(s.procedimento_nome)}</b>`}</td></tr>
       <tr><td>Unidade</td><td colspan="3">${h(s.unidade_origem_nome || s.unidade_solicitante_nome || '—')}</td></tr>
       <tr><td>Solicitante</td><td colspan="3">${h(s.profissional_solicitante || '—')}${s.crm_solicitante ? ' ('+h(s.crm_solicitante)+')' : ''}${s.data_pedido ? ' — pedido de ' + fmtData(s.data_pedido) : ''}</td></tr>
@@ -2448,7 +2469,7 @@ function imprimirComprovante(linhas){
       <div><b>Acompanhe pelo celular</b>
         <div>Aponte a câmera para o código ao lado, ou acesse <span class="url">${h(acompanhar)}</span></div>
         <div>Será pedido o protocolo <b>${h(s.protocolo)}</b> e a data de nascimento do paciente.</div>
-        ${l.length > 1 ? '<div>Os demais protocolos estão na lista acima e podem ser consultados do mesmo jeito.</div>' : ''}</div>
+        ${l.some(x => x.protocolo !== s.protocolo) ? '<div>Os demais protocolos estão na lista acima e podem ser consultados do mesmo jeito.</div>' : ''}</div>
     </div>` : ''}
     <div class="ass"><div>Responsável pelo registro</div><div>Paciente / responsável</div></div>
     <div class="rod"><span>${h(ORGAO)}</span><span>Emitido em ${new Date().toLocaleString('pt-BR')}</span></div>
@@ -2491,9 +2512,9 @@ function imprimirGuia(s, itens){
     <table>
       <tr><td>Paciente</td><td><b>${h(s.paciente_nome)}</b></td><td>Nascimento</td><td>${fmtData(s.paciente_nascimento)}</td></tr>
       <tr><td>CPF</td><td>${fCPF(s.paciente_cpf)}</td><td>Cartão SUS</td><td>${fCNS(s.paciente_cns)}</td></tr>
-      <tr><td>Telefone</td><td>${fTel(s.paciente_telefone)}</td><td>Protocolo</td><td>${exames.length > 1 ? `${exames.length} exames (ver abaixo)` : h(s.protocolo)}</td></tr>
+      <tr><td>Telefone</td><td>${fTel(s.paciente_telefone)}</td><td>Protocolo</td><td>${h(s.protocolo)}</td></tr>
       <tr><td>${exames.length > 1 ? 'Exames' : 'Procedimento'}</td><td colspan="3">${exames.length > 1
-        ? `<ol class="exames">${exames.map(x => `<li><b>${h(x.procedimento_nome)}</b>${x.procedimento_codigo ? ' — SIGTAP '+h(x.procedimento_codigo) : ''} <span class="pr">protocolo ${h(x.protocolo)}</span></li>`).join('')}</ol>`
+        ? `<ol class="exames">${exames.map(x => `<li><b>${h(x.procedimento_nome)}</b>${x.procedimento_codigo ? ' — SIGTAP '+h(x.procedimento_codigo) : ''}${x.protocolo === s.protocolo ? '' : ` <span class="pr">protocolo ${h(x.protocolo)}</span>`}</li>`).join('')}</ol>`
         : `<b>${h(s.procedimento_nome)}</b>${s.procedimento_codigo ? ' — SIGTAP '+h(s.procedimento_codigo) : ''}`}</td></tr>
       <tr><td>Local</td><td colspan="3"><b>${h(s.unidade_executante_nome)}</b>${s.unidade_executante_endereco ? ' — '+h(s.unidade_executante_endereco) : ''}${s.unidade_executante_telefone ? ' — Tel. '+fTel(s.unidade_executante_telefone) : ''}</td></tr>
       <tr><td>Profissional</td><td>${h(s.vaga_profissional||'—')}</td><td>Solicitante</td><td>${h(s.profissional_solicitante||'—')}${s.crm_solicitante ? ' ('+h(s.crm_solicitante)+')' : ''}</td></tr>

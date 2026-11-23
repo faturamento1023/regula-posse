@@ -622,3 +622,46 @@ begin
 end $$;
 
 select 'TESTES DA MIGRAÇÃO 008 PASSARAM' as resultado;
+
+-- ---------------------------------------------------------------------
+--  MIGRAÇÃO 009 — um protocolo para o pedido de laboratório
+-- ---------------------------------------------------------------------
+do $$
+declare
+  lab bigint; ubs bigint; pac bigint; prot text; n int;
+begin
+  select id into lab from unidades where nome = 'Laboratório Teste';
+  select id into ubs from unidades where nome = 'UBS Teste';
+  insert into pacientes (nome, cpf, data_nascimento, sexo)
+  values ('Pedido Único','15350946056','1975-05-20','F') returning id into pac;
+
+  insert into procedimentos (nome, tipo, laboratorio, ativo) values ('Ureia teste','exame',true,true);
+  prot := gerar_protocolo();
+  insert into solicitacoes (protocolo, paciente_id, procedimento_id, unidade_solicitante_id, data_pedido)
+  select prot, pac, p.id, ubs, current_date from procedimentos p where p.laboratorio and p.ativo limit 3;
+  select count(*) into n from solicitacoes where protocolo = prot;
+  if n <> 3 then raise exception 'os 3 exames deviam dividir o mesmo protocolo, há %', n; end if;
+
+  -- o acompanhamento devolve os três, não um
+  select count(*) into n from consultar_protocolo(prot, '1975-05-20');
+  if n <> 3 then raise exception 'consultar_protocolo devia devolver 3 linhas, devolveu %', n; end if;
+  if exists (select 1 from consultar_protocolo(prot, '1975-05-20') where resultado <> 'ok') then
+    raise exception 'as três linhas deviam vir com resultado ok'; end if;
+
+  -- data de nascimento errada não vaza a existência do protocolo
+  select count(*) into n from consultar_protocolo(prot, '1980-01-01') where resultado = 'nao_encontrado';
+  if n <> 1 then raise exception 'data errada devia dar nao_encontrado em uma linha só'; end if;
+
+  -- consultar um pedido de 3 exames gasta UMA tentativa, não três
+  select count(*) into n from consultas_publicas where protocolo = prot and sucesso;
+  perform count(*) from consultar_protocolo(prot, '1975-05-20');
+  if (select count(*) from consultas_publicas where protocolo = prot and sucesso) <> n + 1 then
+    raise exception 'uma consulta de 3 exames devia registrar uma tentativa só'; end if;
+
+  -- e o MIRA continua com identificador único por registro
+  if (select count(distinct identificador_registro) from vw_mira)
+     <> (select count(*) from vw_mira) then
+    raise exception 'o MIRA tem identificador de registro repetido'; end if;
+end $$;
+
+select 'TESTES DA MIGRAÇÃO 009 PASSARAM' as resultado;
