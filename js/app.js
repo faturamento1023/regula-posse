@@ -55,7 +55,11 @@ const STATUS_ICO = { pendente:'◷', regulacao:'⚖', autorizada:'✓', devolvid
   livre:'○', ocupada:'●', bloqueada:'⊘', ativo:'✓', inativo:'⊘' };
 const PAPEIS = { admin:'Administrador', solicitante:'Atendente', agendador:'Agendador / Central', regulador:'Regulador', executante:'Local de atendimento' };
 const TIPOS_PROC = { consulta:'Consulta', exame:'Exame', cirurgia:'Cirurgia', terapia:'Terapia', outro:'Outro' };
-const TIPOS_UNI = { solicitante:'Solicitante (UBS / origem)', executante:'Local de atendimento', ambos:'Solicitante e local de atendimento' };
+const TIPOS_UNI = { solicitante:'Solicitante (UBS / origem)', executante:'Local de atendimento', ambos:'Solicitante e local de atendimento', regulacao:'Central de regulação' };
+/* Listas do que entra, não do que fica de fora: como negação, todo tipo novo
+   entraria por engano na lista de origem do pedido. */
+const ORIGENS = u => ['solicitante','ambos'].includes(u.tipo);
+const ATENDEM = u => ['executante','ambos'].includes(u.tipo);
 const UFS = 'AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO'.split(' ');
 const AGUARDANDO = ['pendente','autorizada'];
 const ABERTAS = ['pendente','autorizada','agendada','devolvida'];
@@ -326,7 +330,7 @@ const profsAtivos = () => S.profissionais.filter(p => p.ativo);
 const procExige = id => !!S.procedimentos.find(p => p.id === id)?.exige_regulacao;
 const papel = () => S.perfil?.papel;
 const can = (...p) => p.includes(papel());
-const locaisExec = () => S.unidades.filter(u => u.ativo && u.tipo !== 'solicitante');
+const locaisExec = () => S.unidades.filter(u => u.ativo && ATENDEM(u));
 const locaisDoProc = pid => { const ids = S.unProc.filter(x => x.procedimento_id === pid).map(x => x.unidade_id);
   const l = locaisExec().filter(u => ids.includes(u.id)); return l.length ? l : locaisExec(); };
 const procsDoLocal = uid => { const ids = S.unProc.filter(x => x.unidade_id === uid).map(x => x.procedimento_id);
@@ -1207,7 +1211,7 @@ const F_PACIENTE = [
   { name:'cidade', label:'Cidade', default:MUNICIPIO.cidade },
   { name:'uf', label:'UF', type:'select', default:MUNICIPIO.uf, options: UFS.map(u => ({ value:u, label:u })) },
   { name:'unidade_referencia_id', label:'UBS de referência', type:'select', num:true, span:4,
-    options: () => S.unidades.filter(u => u.ativo && u.tipo !== 'executante').map(u => ({ value:u.id, label:u.nome })) },
+    options: () => S.unidades.filter(u => u.ativo && ORIGENS(u)).map(u => ({ value:u.id, label:u.nome })) },
 ];
 
 function abrirPaciente(pac, onSalvo){
@@ -1449,7 +1453,7 @@ async function pgSolicitacao(el){
     { name:'profissional', label:'Profissional solicitante', required:true, span:2, dica:'Nome do médico(a) que assinou o pedido' },
     { name:'crm', label:'CRM ou registro', dica:'Ex.: CRM-GO 12345' },
     ...(!S.perfil.unidade_id ? [{ name:'registro', label:'Unidade de registro', type:'select', required:true, num:true,
-      options: S.unidades.filter(u => u.ativo && u.tipo !== 'executante').map(u => ({ value:u.id, label:u.nome })), dica:'Unidade onde a solicitação está sendo registrada.' }] : []),
+      options: S.unidades.filter(u => u.ativo && ORIGENS(u)).map(u => ({ value:u.id, label:u.nome })), dica:'Unidade onde a solicitação está sendo registrada.' }] : []),
   ];
   function etapa2(){
     return formHtml(F_PEDIDO(), { origem:W.origem, data_pedido:W.data_pedido, cid10:W.cid10, profissional:W.profissional, crm:W.crm, registro:W.registro }, 'sw')
@@ -1680,7 +1684,7 @@ function filtrosHtml(pref, v={}, { status=FILTRO_STATUS.map(x => x[0]), ordem=tr
     <div class="field"><label for="${id('st')}">Situação</label><select id="${id('st')}">${FILTRO_STATUS.filter(x => status.includes(x[0])).map(([k, l]) => `<option value="${k}" ${k===(v.st??'')?'selected':''}>${h(l)}</option>`).join('')}</select></div>
     <div class="field"><label for="${id('pr')}">Risco</label><select id="${id('pr')}"><option value="">Todos</option>${Object.entries(PRIORIDADES).map(([k, p]) => `<option value="${k}" ${k===v.pr?'selected':''}>${p.s} ${p.l}</option>`).join('')}</select></div>
     <div class="field"><label for="${id('proc')}">Procedimento</label><select id="${id('proc')}">${optList(S.procedimentos, v.proc, 'Todos')}</select></div>
-    <div class="field"><label for="${id('orig')}">Origem do pedido</label><select id="${id('orig')}">${optList(S.unidades.filter(u => u.tipo !== 'executante'), v.orig, 'Todas')}</select></div>
+    <div class="field"><label for="${id('orig')}">Origem do pedido</label><select id="${id('orig')}">${optList(S.unidades.filter(ORIGENS), v.orig, 'Todas')}</select></div>
     ${periodo ? `<div class="field"><label for="${id('de')}">Registrada de</label><input type="date" id="${id('de')}" value="${h(v.de||'')}"></div>
     <div class="field"><label for="${id('ate')}">até</label><input type="date" id="${id('ate')}" value="${h(v.ate||'')}"></div>` : ''}
     ${ordem ? `<div class="field"><label for="${id('ord')}">Ordenar por</label><select id="${id('ord')}">${ORDENS.map(([k, l]) => `<option value="${k}" ${k===(v.ord||'prioridade')?'selected':''}>${h(l)}</option>`).join('')}</select></div>` : ''}
@@ -2923,20 +2927,20 @@ function pgLocais(el){
     campos:[
       { name:'nome', label:'Nome', required:true, span:3 },
       { name:'cnes', label:'CNES', attrs:'inputmode="numeric" maxlength="7"', dica:'7 números' },
-      { name:'tipo', label:'Tipo', type:'select', required:true, empty:false, options: opts(TIPOS_UNI), span:2, dica:'Local de atendimento = onde o paciente é atendido e a guia é confirmada.' },
+      { name:'tipo', label:'Tipo', type:'select', required:true, empty:false, options: opts(TIPOS_UNI), span:2, dica:'Local de atendimento = onde o paciente é atendido e a guia é confirmada. Central de regulação = quem recebe e analisa os pedidos; não aparece como origem nem como local de atendimento, e é o CNES enviado ao Ministério.' },
       { name:'telefone', label:'Telefone', mask:'tel', dica:'Aparece na guia do paciente.' },
       { name:'ativo', label:'Situação', type:'checkbox', text:'Ativo' },
-      { name:'endereco', label:'Endereço completo', span:4, dica:'Aparece na guia do paciente.' },
-      { name:'reguladora', label:'Central de regulação', type:'checkbox', span:4,
-        text:'Esta é a central de regulação do município',
-        dica:'O CNES desta unidade vai no campo "estabelecimento regulador" dos lotes enviados ao Ministério. Só uma unidade pode estar marcada: marcar esta desmarca a anterior.' } ],
-    validar:(o, err) => { if(o.cnes && !/^\d{7}$/.test(o.cnes)) err('cnes', 'CNES deve ter 7 números.'); },
+      { name:'endereco', label:'Endereço completo', span:4, dica:'Aparece na guia do paciente.' } ],
+    validar:(o, err, item) => {
+      if(o.cnes && !/^\d{7}$/.test(o.cnes)) err('cnes', 'CNES deve ter 7 números.');
+      const outra = o.tipo === 'regulacao' && S.unidades.find(u => u.tipo === 'regulacao' && u.id !== item?.id);
+      if(outra) err('tipo', `${outra.nome} já está cadastrada como central de regulação. Só pode haver uma: troque o tipo dela primeiro.`);
+    },
     colunas:[ { l:'Nome', f:d => `<b>${h(d.nome)}</b>${d.endereco ? `<small>${h(d.endereco)}</small>` : ''}`, v:d => d.nome },
-      { l:'Tipo', f:d => h(TIPOS_UNI[d.tipo]) + (d.reguladora ? ' <span class="tag">central de regulação</span>' : ''),
-        v:d => d.tipo + (d.reguladora ? ' reguladora' : '') },
+      { l:'Tipo', f:d => h(TIPOS_UNI[d.tipo]), v:d => d.tipo },
       { l:'CNES', f:d => d.cnes ? h(d.cnes) : '<span class="tag inc">sem CNES</span>', v:d => d.cnes || '' },
       { l:'Telefone', f:d => fTel(d.telefone), v:d => d.telefone || '' },
-      { l:'Procedimentos realizados', f:d => { const l = procsDoLocal(d.id); return d.tipo === 'solicitante' ? '<span class="muted">não se aplica</span>'
+      { l:'Procedimentos realizados', f:d => { const l = procsDoLocal(d.id); return !ATENDEM(d) ? '<span class="muted">não se aplica</span>'
           : l.length ? h(l.slice(0,3).map(p => p.nome).join(', ')) + (l.length > 3 ? ` <span class="muted">+${l.length-3}</span>` : '') : '<span class="tag inc">nenhum</span>'; }, v:d => procsDoLocal(d.id).length } ],
     extra: {
       html: item => { const ja = item ? procsDoLocal(item.id).map(p => p.id) : [];
@@ -3227,7 +3231,9 @@ async function pgUsuarios(el){
       { name:'ativo', label:'Situação', type:'checkbox', text:'Acesso ativo' } ],
     validar:(o, err) => {
       if(['solicitante','executante'].includes(o.papel) && !o.unidade_id) err('unidade_id', `O perfil ${PAPEIS[o.papel]} precisa de uma unidade vinculada.`);
-      if(o.papel === 'executante' && o.unidade_id && S.unidades.find(u => u.id === o.unidade_id)?.tipo === 'solicitante') err('unidade_id', 'Para Local de atendimento, escolha uma unidade do tipo local de atendimento.');
+      { const u = o.unidade_id && S.unidades.find(x => x.id === o.unidade_id);
+        if(o.papel === 'executante' && u && !ATENDEM(u)) err('unidade_id', 'Para Local de atendimento, escolha uma unidade do tipo local de atendimento.');
+        if(o.papel === 'solicitante' && u && !ORIGENS(u)) err('unidade_id', 'Para Solicitante, escolha uma unidade que seja origem de pedido.'); }
       if(o.email && !/^\S+@\S+\.\S+$/.test(o.email)) err('email', 'E-mail inválido. Use o formato nome@dominio.');
     },
     colunas:[ { l:'Nome', f:d => `<b>${h(d.nome)}</b>${d.id === S.perfil.id ? ' <span class="tag">você</span>' : ''}`, v:d => d.nome },
@@ -3270,7 +3276,7 @@ async function pgRelatorios(el){
       <div class="field"><label for="r-ate">até</label><input type="date" id="r-ate" value="${hoje}"></div>
       <div class="field"><label for="r-local">Local de atendimento</label><select id="r-local" ${fixo?'disabled':''}>${optList(execs, fixo ? S.perfil.unidade_id : '', fixo ? null : 'Todos os locais')}</select></div>
       <div class="field"><label for="r-proc">Procedimento</label><select id="r-proc">${optList(S.procedimentos, '', 'Todos')}</select></div>
-      <div class="field"><label for="r-orig">Origem do pedido</label><select id="r-orig">${optList(S.unidades.filter(u => u.tipo !== 'executante'), '', 'Todas')}</select></div>
+      <div class="field"><label for="r-orig">Origem do pedido</label><select id="r-orig">${optList(S.unidades.filter(ORIGENS), '', 'Todas')}</select></div>
       <div class="field"><span class="lbl" aria-hidden="true">&nbsp;</span><div class="row">
         <button type="button" class="btn sm" data-per="mes">Mês atual</button><button type="button" class="btn sm" data-per="ant">Mês anterior</button><button type="button" class="btn sm" data-per="30">Últimos 30 dias</button></div></div>
       <button class="btn pri" type="submit">Gerar relatório</button>

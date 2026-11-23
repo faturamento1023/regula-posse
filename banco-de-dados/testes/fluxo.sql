@@ -475,30 +475,42 @@ end $$;
 select 'TESTES DA MIGRAÇÃO 005 PASSARAM' as resultado;
 
 -- ---------------------------------------------------------------------
---  MIGRAÇÃO 007 — só uma unidade pode ser a central de regulação
+--  MIGRAÇÃO 007 — a central de regulação como tipo de unidade
 -- ---------------------------------------------------------------------
 do $$
-declare a bigint; b bigint; n int;
+declare a bigint; b bigint; n int; marcada boolean;
 begin
-  insert into unidades (nome, tipo, reguladora) values ('Central A', 'solicitante', true) returning id into a;
-  select count(*) into n from unidades where reguladora;
-  if n <> 1 then raise exception 'devia haver exatamente uma reguladora após o primeiro insert, há %', n; end if;
+  insert into unidades (nome, tipo) values ('Central A', 'regulacao') returning id into a;
+  select reguladora into marcada from unidades where id = a;
+  if not marcada then raise exception 'tipo regulacao devia marcar reguladora'; end if;
 
-  -- marcar outra desmarca a anterior, sem erro
-  insert into unidades (nome, tipo, reguladora) values ('Central B', 'solicitante', true) returning id into b;
-  select count(*) into n from unidades where reguladora;
-  if n <> 1 then raise exception 'marcar a segunda devia deixar só uma, há %', n; end if;
-  if not exists (select 1 from unidades where id = b and reguladora) then
-    raise exception 'a última marcada devia ser a reguladora'; end if;
-  if exists (select 1 from unidades where id = a and reguladora) then
-    raise exception 'a anterior devia ter sido desmarcada'; end if;
+  -- a marca é derivada: mexer nela à mão não cria divergência
+  update unidades set reguladora = false where id = a;
+  select reguladora into marcada from unidades where id = a;
+  if not marcada then raise exception 'reguladora devia voltar a true, é derivada do tipo'; end if;
 
-  -- desmarcar a única não marca nenhuma outra no lugar
-  update unidades set reguladora = false where id = b;
-  select count(*) into n from unidades where reguladora;
-  if n <> 0 then raise exception 'desmarcar devia deixar nenhuma, há %', n; end if;
+  -- trocar o tipo desmarca
+  update unidades set tipo = 'solicitante' where id = a;
+  select reguladora into marcada from unidades where id = a;
+  if marcada then raise exception 'deixar de ser regulacao devia desmarcar'; end if;
 
-  delete from unidades where id in (a, b);
+  -- só uma central: a segunda é recusada
+  update unidades set tipo = 'regulacao' where id = a;
+  begin
+    insert into unidades (nome, tipo) values ('Central B', 'regulacao') returning id into b;
+    raise exception 'uma segunda central devia ter sido recusada';
+  exception when unique_violation then null;
+  end;
+
+  select count(*) into n from unidades where reguladora;
+  if n <> 1 then raise exception 'devia haver exatamente uma reguladora, há %', n; end if;
+
+  -- o MIRA para de reclamar quando existe uma
+  if exists (select 1 from mira_pendencias() where problema like '%reguladora%') then
+    raise exception 'com central cadastrada não devia haver pendência de reguladora';
+  end if;
+
+  delete from unidades where id = a;
 end $$;
 
 select 'TESTES DA MIGRAÇÃO 007 PASSARAM' as resultado;
