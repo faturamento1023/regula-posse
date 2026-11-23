@@ -1656,10 +1656,21 @@ async function pgSolicitacao(el){
         ${envio.enviados ? `<p class="muted" style="margin-top:10px">${num(envio.enviados)} documento(s) anexado(s).</p>` : ''}
         <p class="muted" style="margin-top:10px">Informe os números de protocolo ao paciente para acompanhamento.</p>
         <div class="acoes" style="margin-top:12px">
+          <button type="button" class="btn lg" id="ok-comprov">Imprimir comprovante</button>
           ${agendaveis.length && pode('agendamento') ? `<a class="btn pri lg" href="#/agendamento?pac=${pac.id}">Agendar agora ›</a>` : ''}
           <a class="btn" href="#/solicitacao?pac=${pac.id}&n=${Date.now()}">Nova solicitação para ${h(pac.nome.split(' ')[0])}</a>
           <a class="btn" href="#/solicitacao?n=${Date.now()}">Nova solicitação (outro paciente)</a>
           <a class="btn link" href="#/solicitacoes">Ver solicitações</a></div></section>`;
+      /* Monta o comprovante com o que já está em mãos: refazer a consulta aqui
+         só para reimprimir o que acabou de ser digitado seria ida e volta à toa. */
+      const linhasComprov = criadas.map(c => ({
+        protocolo:c.protocolo, paciente_id:pac.id, paciente_nome:pac.nome,
+        paciente_nascimento:pac.data_nascimento, paciente_cpf:pac.cpf, paciente_cns:pac.cns,
+        paciente_telefone:pac.telefone, procedimento_nome:nomeProc(c.procedimento_id),
+        unidade_origem_nome: +W.origem ? nomeUnidade(+W.origem) : nomeUnidade(unidReg),
+        profissional_solicitante:W.profissional, crm_solicitante:W.crm || null,
+        data_pedido:brParaISO(W.data_pedido) }));
+      $('#ok-comprov').onclick = () => imprimirComprovante(linhasComprov);
       $('#ok-t', el).focus();
     } catch(e){
       $('#sw-erros').innerHTML = alerta('err', h(e.message) + ' Seus dados continuam preenchidos; tente de novo.', 'Não foi possível registrar');
@@ -1822,6 +1833,9 @@ async function abrirSolicitacao(id, depois){
     if(pode('agendamento')) acoes.push({ label:'Remarcar', onClick: () => { ir(`#/agendamento?sol=${id}&pac=${s.paciente_id}`); } });
     if(pode('confirmacao')) acoes.push({ label:'Confirmar atendimento ›', cls:'pri', onClick: () => { ir(`#/confirmacao?guia=${s.numero_guia}`); } });
   }
+  /* Antes de existir vaga, o papel que o paciente leva é o comprovante. */
+  if(['pendente','autorizada','devolvida'].includes(s.status))
+    acoes.push({ label:'Imprimir comprovante', onClick: () => { imprimirComprovante([s]); return false; } });
   acoes.push({ label:'Fechar' });
 
   m = modal({
@@ -2377,6 +2391,75 @@ async function pgAgendamento(el){
 }
 
 /* ---------- Guia de agendamento (2 vias) ---------- */
+/* ---------- Comprovante de solicitação ----------
+   Impresso no momento do registro, antes de existir vaga. Não é a guia de
+   agendamento: não tem data, hora nem local, porque nada disso foi decidido
+   ainda. Serve para o paciente sair da unidade com o protocolo na mão e com
+   o QR do acompanhamento — sem isso ele depende de ter anotado o número ou
+   de telefonar para a Secretaria para saber se já foi marcado. */
+function imprimirComprovante(linhas){
+  const l = [].concat(linhas).filter(Boolean);
+  if(!l.length) return;
+  const s = l[0];
+  registrarAcesso(s.paciente_id, 'impressão de comprovante de solicitação');
+  const w = window.open('', '_blank');
+  if(!w){ toast('O navegador bloqueou a janela de impressão. Permita pop-ups e tente de novo.', 'err'); return; }
+  const logo = new URL('assets/regula-posse-emblema.png', location.href).href;
+  const acompanhar = urlAcompanhar(s.protocolo);
+  let qr = '';
+  try { qr = qrSVG(acompanhar, { lado: 120, nivel: 'M', titulo: `Acompanhar o protocolo ${s.protocolo}` }); }
+  catch(e){ registrarErro(e, 'qr do comprovante'); }
+
+  w.document.write(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><title>Comprovante ${h(s.protocolo)}</title>
+  <style>body{font-family:Arial,sans-serif;max-width:760px;margin:16px auto;color:#111;font-size:12.5px}
+  .cab{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #0b4f7c;padding-bottom:6px}
+  .g{text-align:right;font-size:11px}.g b{font-size:22px;letter-spacing:.06em}
+  .dest{font-size:15px;font-weight:bold;background:#fdf6e3;border:1px solid #e8d08a;padding:8px;border-radius:6px;text-align:center;margin:8px 0}
+  table{width:100%;border-collapse:collapse}td{padding:3px 4px;vertical-align:top;border-bottom:1px solid #ddd}td:nth-child(odd){color:#444;width:90px}
+  .obs{font-size:11px;color:#222;border:1px dashed #777;padding:6px;margin-top:8px}
+  .ass{margin-top:30px;display:flex;gap:40px}
+  .ass div{flex:1;border-top:1px solid #000;text-align:center;padding-top:3px;font-size:11px}
+  .rod{display:flex;justify-content:space-between;font-size:10px;color:#555;margin-top:8px}
+  .acomp{display:flex;gap:12px;align-items:center;margin-top:8px;border:1px solid #c5d9ea;background:#f7fbfe;padding:8px;border-radius:6px;font-size:10.5px}
+  .acomp .qr{flex:none;line-height:0}.acomp .qr svg{width:120px;height:120px;display:block}
+  .acomp .url{font-family:monospace;word-break:break-all}
+  .itens{margin:2px 0 0;padding-left:18px}.itens li{margin-bottom:1px}.itens .pr{color:#555;font-size:10.5px}
+  @media print{button{display:none}body{margin:0 auto}@page{size:A4 portrait;margin:10mm}}</style></head><body>
+  <div class="via">
+    <div class="cab"><div><img src="${logo}" alt="Regula Posse" style="height:40px"><div style="margin-top:4px"><b>${h(ORGAO)}</b> — Central de Regulação</div>
+      <div><b>Comprovante de Solicitação</b></div></div>
+      <div class="g">PROTOCOLO<br><b>${h(s.protocolo)}</b></div></div>
+    <div class="dest">Solicitação registrada — aguardando agendamento</div>
+    <table>
+      <tr><td>Paciente</td><td><b>${h(s.paciente_nome)}</b></td><td>Nascimento</td><td>${fmtData(s.paciente_nascimento)}</td></tr>
+      <tr><td>CPF</td><td>${fCPF(s.paciente_cpf)}</td><td>Cartão SUS</td><td>${fCNS(s.paciente_cns)}</td></tr>
+      <tr><td>Telefone</td><td>${fTel(s.paciente_telefone)}</td><td>Registrada em</td><td>${fmtData(hojeISO())}</td></tr>
+      <tr><td>${l.length > 1 ? 'Procedimentos' : 'Procedimento'}</td><td colspan="3">${l.length > 1
+        ? `<ol class="itens">${l.map(x => `<li><b>${h(x.procedimento_nome)}</b> <span class="pr">protocolo ${h(x.protocolo)}</span></li>`).join('')}</ol>`
+        : `<b>${h(s.procedimento_nome)}</b>`}</td></tr>
+      <tr><td>Unidade</td><td colspan="3">${h(s.unidade_origem_nome || s.unidade_solicitante_nome || '—')}</td></tr>
+      <tr><td>Solicitante</td><td colspan="3">${h(s.profissional_solicitante || '—')}${s.crm_solicitante ? ' ('+h(s.crm_solicitante)+')' : ''}${s.data_pedido ? ' — pedido de ' + fmtData(s.data_pedido) : ''}</td></tr>
+    </table>
+    <div class="obs"><b>Este comprovante não é a guia de atendimento.</b> Ele registra que a solicitação entrou na fila da regulação.
+      A data, a hora e o local do atendimento serão informados depois, e aí sim é emitida a guia que o paciente leva no dia.
+      Guarde este papel e acompanhe pelo código abaixo; mantenha seu telefone atualizado na unidade.</div>
+    ${qr ? `<div class="acomp">
+      <div class="qr">${qr}</div>
+      <div><b>Acompanhe pelo celular</b>
+        <div>Aponte a câmera para o código ao lado, ou acesse <span class="url">${h(acompanhar)}</span></div>
+        <div>Será pedido o protocolo <b>${h(s.protocolo)}</b> e a data de nascimento do paciente.</div>
+        ${l.length > 1 ? '<div>Os demais protocolos estão na lista acima e podem ser consultados do mesmo jeito.</div>' : ''}</div>
+    </div>` : ''}
+    <div class="ass"><div>Responsável pelo registro</div><div>Paciente / responsável</div></div>
+    <div class="rod"><span>${h(ORGAO)}</span><span>Emitido em ${new Date().toLocaleString('pt-BR')}</span></div>
+  </div>
+  <p><button type="button" id="btn-imprimir">Imprimir</button></p></body></html>`);
+  w.document.close();
+  const btn = w.document.getElementById('btn-imprimir');
+  if(btn) btn.onclick = () => w.print();
+  setTimeout(() => { try { w.focus(); w.print(); } catch { /* janela fechada antes */ } }, 400);
+}
+
 /* itens: as linhas que dividem esta guia. Na guia comum é a própria
    solicitação; na de laboratório são todos os exames da coleta. */
 function imprimirGuia(s, itens){
