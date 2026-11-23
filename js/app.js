@@ -2401,7 +2401,7 @@ function imprimirGuia(s, itens){
   } catch(e){
     registrarErro(e, 'qr da guia');     // guia sem QR ainda serve; sem guia, não
   }
-  const via = nome => `<div class="via">
+  const via = () => `<div class="via">
     <div class="cab"><div><img src="${logo}" alt="Regula Posse" style="height:40px"><div style="margin-top:4px"><b>${h(ORGAO)}</b> — Central de Regulação</div><div><b>Guia de Agendamento</b></div></div>
       <div class="g">GUIA Nº<br><b>${h(s.numero_guia)}</b></div></div>
     <div class="dest">${dataExtenso(s.vaga_data)}${s.vaga_hora ? ` às ${fmtHora(s.vaga_hora)}` : ''}</div>
@@ -2424,7 +2424,7 @@ function imprimirGuia(s, itens){
         <div>Será pedido o protocolo <b>${h(s.protocolo)}</b> e a data de nascimento do paciente.</div></div>
     </div>` : ''}
     <div class="ass"><div>Responsável pelo agendamento</div><div>Paciente / responsável</div></div>
-    <div class="rod"><span>${nome}</span><span>Emitido em ${new Date().toLocaleString('pt-BR')}</span></div></div>`;
+    <div class="rod"><span>${h(ORGAO)}</span><span>Emitido em ${new Date().toLocaleString('pt-BR')}</span></div></div>`;
   w.document.write(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><title>Guia ${h(s.numero_guia)}</title>
   <style>body{font-family:Arial,sans-serif;max-width:760px;margin:16px auto;color:#111;font-size:12.5px}
   .cab{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #0b4f7c;padding-bottom:6px}
@@ -2439,9 +2439,8 @@ function imprimirGuia(s, itens){
   .acomp .qr svg{width:120px;height:120px;display:block}
   .acomp .url{font-family:monospace;word-break:break-all}
   .exames{margin:2px 0 0;padding-left:18px}.exames li{margin-bottom:1px}.exames .pr{color:#555;font-size:10.5px}
-  .corte{border-top:1px dashed #000;margin:18px 0;text-align:center;font-size:10px;color:#555}
   @media print{button{display:none}body{margin:0 auto}@page{size:A4 portrait;margin:10mm}}</style></head><body>
-  ${via('Via do paciente')}<div class="corte">✂ recorte aqui</div>${via('Via do local de atendimento')}
+  ${via()}
   <p><button type="button" id="btn-imprimir">Imprimir</button></p></body></html>`);
   w.document.close();
   /* O botão e a impressão automática são ligados daqui, pela janela que
