@@ -2250,6 +2250,11 @@ end $$;
 --  existe o estado em que a tela diz uma coisa e o lote enviado ao
 --  Ministério diz outra.
 -- ---------------------------------------------------------------------
+-- A coluna vem da migração 003. Repetida aqui, sem efeito se já existe, para
+-- que esta migração possa ser colada sozinha no SQL Editor sem falhar.
+alter table unidades
+  add column if not exists reguladora boolean not null default false;
+
 alter table unidades drop constraint if exists unidades_tipo_check;
 alter table unidades add constraint unidades_tipo_check
   check (tipo in ('solicitante','executante','ambos','regulacao'));
