@@ -1188,7 +1188,7 @@ async function painelAdmin(rows, hoje, ini){
   const alertas = [
     [ativosExec.filter(u => !procsDoLocal(u.id).length), 'locais de atendimento sem procedimentos cadastrados', '#/locais'],
     [procsAtivos.filter(p => !S.unProc.some(x => x.procedimento_id === p.id)), 'procedimentos sem local de atendimento', '#/procedimentos'],
-    [procsAtivos.filter(p => !p.codigo_sigtap), 'procedimentos sem código SIGTAP', '#/procedimentos'],
+    [procsAtivos.filter(p => !(p.codigo_sigtap || p.codigo_sigtap_referencia)), 'procedimentos sem código SIGTAP', '#/procedimentos'],
     [S.unidades.filter(u => u.ativo && !u.cnes), 'unidades sem CNES', '#/locais'],
     [perfis.filter(p => p.ativo && !p.unidade_id && p.papel !== 'admin'), 'usuários sem unidade vinculada', '#/usuarios'],
     [[...filaProcs].filter(pid => !v30.some(v => v.procedimento_id === pid && v.status === 'livre')), 'procedimentos com fila e sem vaga livre nos próximos 30 dias', '#/agendas'],
@@ -1541,7 +1541,7 @@ async function pgSolicitacao(el){
         <span class="dica" id="sel-proc-d">Escolha e clique em Adicionar. Repita para cada item do pedido.</span>
         <p class="erro-msg hidden" id="sel-proc-e"></p>
         <div class="row" style="flex-wrap:nowrap"><select id="sel-proc" aria-describedby="sel-proc-d sel-proc-e" style="flex:1"><option value="">Selecione</option>
-          ${grupos.map(([t, l]) => `<optgroup label="${h(TIPOS_PROC[t])}">${l.map(p => `<option value="${p.id}">${p.codigo_sigtap ? h(p.codigo_sigtap) + ' — ' : ''}${h(p.nome)}${p.exige_regulacao ? ' — exige regulação' : ''}</option>`).join('')}</optgroup>`).join('')}
+          ${grupos.map(([t, l]) => `<optgroup label="${h(TIPOS_PROC[t])}">${l.map(p => `<option value="${p.id}">${(p.codigo_sigtap || p.codigo_sigtap_referencia) ? h(p.codigo_sigtap || p.codigo_sigtap_referencia) + ' — ' : ''}${h(p.nome)}${p.exige_regulacao ? ' — exige regulação' : ''}</option>`).join('')}</optgroup>`).join('')}
         </select><button type="button" class="btn" id="add-proc">+ Adicionar</button></div></div>
       <div class="proc-list" id="proc-list" aria-live="polite"></div>`;
   }
@@ -3517,7 +3517,8 @@ function pgProcedimentos(el){
     efeitoDesativar:'Não aparece em novas solicitações nem em novas agendas; solicitações já registradas continuam.',
     campos:[
       { name:'nome', label:'Nome', required:true, span:3 },
-      { name:'codigo_sigtap', label:'Código SIGTAP', attrs:'inputmode="numeric" maxlength="10"', dica:'10 números, conforme a tabela SIGTAP' },
+      { name:'codigo_sigtap', label:'Código SIGTAP', attrs:'inputmode="numeric" maxlength="10"', dica:'10 números, conforme a tabela SIGTAP. Nos procedimentos SIGTAP importados, este código já está reservado.' },
+      { name:'codigo_sigtap_referencia', label:'SIGTAP de referência', attrs:'inputmode="numeric" maxlength="10"', dica:'Para exames internos com nome próprio: informe o código SIGTAP oficial equivalente, já existente no catálogo. Não altera o nome e não duplica códigos.' },
       { name:'tipo', label:'Tipo', type:'select', required:true, empty:false, options: opts(TIPOS_PROC) },
       { name:'especialidade', label:'Especialidade', span:2 },
       { name:'ativo', label:'Situação', type:'checkbox', text:'Ativo' },
@@ -3525,9 +3526,15 @@ function pgProcedimentos(el){
         dica:'Quando marcado, as solicitações deste procedimento que ainda não foram agendadas passam a aguardar a Análise regulatória. Desmarcado, vão direto para o agendamento.' },
       { name:'laboratorio', label:'Laboratório', type:'checkbox', text:'É exame de laboratório (coleta)', span:4,
         dica:'Exames marcados aqui não têm hora marcada: entram na agenda diária do laboratório, junto com os outros exames do mesmo pedido, numa guia só. Não marque raio-x, ultrassom e outros exames com horário.' } ],
-    validar:(o, err) => { if(o.codigo_sigtap && !/^\d{10}$/.test(o.codigo_sigtap)) err('codigo_sigtap', 'O código SIGTAP tem 10 números.'); },
+    validar:(o, err) => {
+      if(o.codigo_sigtap && !/^\d{10}$/.test(o.codigo_sigtap)) err('codigo_sigtap', 'O código SIGTAP tem 10 números.');
+      if(o.codigo_sigtap_referencia && !/^\d{10}$/.test(o.codigo_sigtap_referencia)) err('codigo_sigtap_referencia', 'O SIGTAP de referência tem 10 números.');
+      if(o.codigo_sigtap && o.codigo_sigtap_referencia) err('codigo_sigtap_referencia', 'Use o código próprio OU um código de referência, não os dois.');
+    },
     colunas:[ { l:'Nome', f:d => `<b>${h(d.nome)}</b>`, v:d => d.nome },
-      { l:'SIGTAP', f:d => d.codigo_sigtap ? h(d.codigo_sigtap) : '<span class="tag inc">sem código</span>', v:d => d.codigo_sigtap || '' },
+      { l:'SIGTAP', f:d => (d.codigo_sigtap || d.codigo_sigtap_referencia)
+        ? h(d.codigo_sigtap || d.codigo_sigtap_referencia) + (d.codigo_sigtap_referencia ? ' <span class="tag">referência</span>' : '')
+        : '<span class="tag inc">sem código</span>', v:d => d.codigo_sigtap || d.codigo_sigtap_referencia || '' },
       { l:'Tipo', f:d => h(TIPOS_PROC[d.tipo]), v:d => d.tipo }, { l:'Especialidade', f:d => h(d.especialidade || '—'), v:d => d.especialidade || '' },
       { l:'Regulação', f:d => (d.exige_regulacao ? tagReg() : '<span class="muted">Direto para agendamento</span>')
           + (d.laboratorio ? ' <span class="tag">laboratório</span>' : ''), v:d => (d.exige_regulacao ? 0 : 1) },
