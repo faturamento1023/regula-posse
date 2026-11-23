@@ -473,3 +473,32 @@ begin
 end $$;
 
 select 'TESTES DA MIGRAÇÃO 005 PASSARAM' as resultado;
+
+-- ---------------------------------------------------------------------
+--  MIGRAÇÃO 007 — só uma unidade pode ser a central de regulação
+-- ---------------------------------------------------------------------
+do $$
+declare a bigint; b bigint; n int;
+begin
+  insert into unidades (nome, tipo, reguladora) values ('Central A', 'solicitante', true) returning id into a;
+  select count(*) into n from unidades where reguladora;
+  if n <> 1 then raise exception 'devia haver exatamente uma reguladora após o primeiro insert, há %', n; end if;
+
+  -- marcar outra desmarca a anterior, sem erro
+  insert into unidades (nome, tipo, reguladora) values ('Central B', 'solicitante', true) returning id into b;
+  select count(*) into n from unidades where reguladora;
+  if n <> 1 then raise exception 'marcar a segunda devia deixar só uma, há %', n; end if;
+  if not exists (select 1 from unidades where id = b and reguladora) then
+    raise exception 'a última marcada devia ser a reguladora'; end if;
+  if exists (select 1 from unidades where id = a and reguladora) then
+    raise exception 'a anterior devia ter sido desmarcada'; end if;
+
+  -- desmarcar a única não marca nenhuma outra no lugar
+  update unidades set reguladora = false where id = b;
+  select count(*) into n from unidades where reguladora;
+  if n <> 0 then raise exception 'desmarcar devia deixar nenhuma, há %', n; end if;
+
+  delete from unidades where id in (a, b);
+end $$;
+
+select 'TESTES DA MIGRAÇÃO 007 PASSARAM' as resultado;
